@@ -63,11 +63,15 @@ QByteArray publicKeyHash(const QSslCertificate &certificate)
     }
 
     const auto *bytes = ASN1_STRING_get0_data(reinterpret_cast<const ASN1_STRING *>(keyValue));
+#if OPENSSL_VERSION_NUMBER >= 0x40100000L
+    const auto length = static_cast<int>(ASN1_STRING_get_length(reinterpret_cast<const ASN1_STRING *>(keyValue)));
+#else
     const int length = ASN1_STRING_length(reinterpret_cast<const ASN1_STRING *>(keyValue));
+#endif
     if (bytes == nullptr || length <= 0) {
         X509_free(x509);
         return {};
-    }
+    }	    
 
     const QByteArray rawKeyValue(reinterpret_cast<const char *>(bytes), length);
     X509_free(x509);
