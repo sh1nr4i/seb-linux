@@ -33,6 +33,12 @@ void TaskbarButton::setIconPath(const QString &iconPath)
     update();
 }
 
+void TaskbarButton::setCustomIcon(const QIcon &icon)
+{
+    icon_ = icon;
+    update();
+}
+
 void TaskbarButton::setTextMode(bool enabled)
 {
     textMode_ = enabled;
@@ -76,7 +82,7 @@ void TaskbarButton::paintEvent(QPaintEvent *event)
     }
 
     if (textMode_) {
-        painter.setPen(isEnabled() ? palette().buttonText().color() : QColor(0, 0, 0, 64));
+        painter.setPen(isEnabled() ? QColor(Qt::black) : QColor(0, 0, 0, 96));
         const int leftInset = icon_.isNull() ? 12 : 40;
         painter.drawText(rect().adjusted(leftInset, 0, -12, 0), Qt::AlignVCenter | Qt::AlignLeft, text());
     }

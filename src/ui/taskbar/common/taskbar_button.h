@@ -15,6 +15,7 @@ public:
     void setActiveLineVisible(bool visible);
     void setHasPopupOpen(bool open);
     void setIconPath(const QString &iconPath);
+    void setCustomIcon(const QIcon &icon);
     void setTextMode(bool enabled);
 
 protected:

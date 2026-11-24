@@ -105,7 +105,9 @@ void ApplicationControl::updateState()
 {
     const QList<BrowserWindow *> windows = session_.browserWindows();
     button_->setActiveLineVisible(!windows.isEmpty());
-    popup_->setWindows(windows);
+    if (popup_->isVisible()) {
+        popup_->setWindows(windows);
+    }
 }
 
 }  // namespace seb::ui::taskbar
