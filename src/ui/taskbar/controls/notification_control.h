@@ -19,6 +19,9 @@ public:
         bool showDisabledTooltip = true,
         QWidget *parent = nullptr);
 
+    void setToolTipText(const QString &toolTip);
+    void setActive(bool active);
+
 private:
     TaskbarButton *button_ = nullptr;
 };

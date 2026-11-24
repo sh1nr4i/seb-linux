@@ -6,6 +6,7 @@
 #include "configuration/cryptography/key_generator.h"
 #include "applications/application_manager.h"
 #include "browser_window.h"
+#include "proctoring/screen_proctoring_service.h"
 #include "server/server_proxy.h"
 #include "shell/taskbar/platform/battery_controller.h"
 #include "shell/taskbar/platform/network_controller.h"
@@ -83,6 +84,41 @@ SebSession::SebSession(
     if (serverProxy_) serverProxy_->setParent(this);
     const auto &settings = configuration_.settings;
     clipboard_ = std::make_unique<seb::browser::Clipboard>();
+    screenProctoring_ = std::make_unique<seb::proctoring::ScreenProctoringService>(
+        [this]() -> QWidget * {
+            return mainWindow();
+        },
+        [this]() -> seb::proctoring::WindowMetadataContext {
+            seb::proctoring::WindowMetadataContext ctx;
+            BrowserWindow *active = nullptr;
+            for (BrowserWindow *window : browserWindows_) {
+                if (window && window->isActiveWindow()) {
+                    active = window;
+                    break;
+                }
+            }
+            if (!active) {
+                active = mainWindow();
+            }
+            if (active) {
+                ctx.windowTitle = active->taskbarTitle();
+                ctx.browserUrl = active->currentUrl().toString();
+                ctx.isMainWindow = active->isMainWindow();
+            }
+            return ctx;
+        },
+        this);
+    connect(screenProctoring_.get(), &seb::proctoring::ScreenProctoringService::logMessage,
+            this, [this](const QString &message, const QString &severity) {
+                if (serverProxy_ && isServerSession() && !serverFinalized_) {
+                    serverProxy_->logEvent(message, severity);
+                }
+                if (severity == QStringLiteral("ERROR") || severity == QStringLiteral("WARNING")) {
+                    qWarning().noquote() << "[ScreenProctoring]" << message;
+                } else {
+                    qDebug().noquote() << "[ScreenProctoring]" << message;
+                }
+            });
 
     if (sharedEngineProvider && sharedProfile) {
         engineProviderPtr_ = sharedEngineProvider;
@@ -188,6 +224,37 @@ SebSession::SebSession(
                         serverLockScreen_ = nullptr;
                     }
                 });
+        connect(serverProxy_.get(), &seb::server::ServerProxy::screenProctoringInstructionReceived,
+                this, [this](const seb::server::data::ProctoringInstruction &instruction) {
+                    if (serverFinalized_ || !screenProctoring_) {
+                        return;
+                    }
+                    if (instruction.method == seb::server::data::ProctoringMethod::Leave) {
+                        screenProctoring_->stop(true);
+                        return;
+                    }
+                    if (instruction.method != seb::server::data::ProctoringMethod::Join) {
+                        return;
+                    }
+                    auto merged = configuration_.settings.Proctoring.ScreenProctoring;
+                    merged.Enabled = true;
+                    if (!instruction.serviceUrl.trimmed().isEmpty()) {
+                        merged.ServiceUrl = instruction.serviceUrl.trimmed();
+                    }
+                    if (!instruction.clientId.trimmed().isEmpty()) {
+                        merged.ClientId = instruction.clientId.trimmed();
+                    }
+                    if (!instruction.clientSecret.trimmed().isEmpty()) {
+                        merged.ClientSecret = instruction.clientSecret.trimmed();
+                    }
+                    if (!instruction.groupId.trimmed().isEmpty()) {
+                        merged.GroupId = instruction.groupId.trimmed();
+                    }
+                    if (!instruction.encryptionSecret.trimmed().isEmpty()) {
+                        merged.EncryptionSecret = instruction.encryptionSecret.trimmed();
+                    }
+                    screenProctoring_->start(merged, instruction.sessionId.trimmed());
+                });
 
     }
 
@@ -276,6 +343,9 @@ SebSession::SebSession(
 
 SebSession::~SebSession()
 {
+    if (screenProctoring_) {
+        screenProctoring_->stop(false);
+    }
     if (serverLockScreen_) {
         serverLockScreen_->setProperty("sebUnlocked", true);
         serverLockScreen_->close();
@@ -298,6 +368,9 @@ SebSession::~SebSession()
 
 void SebSession::finalizeBrowser(std::function<void(bool)> done, bool discardProfile)
 {
+    if (screenProctoring_) {
+        screenProctoring_->stop(true);
+    }
     if (browserFinalizationComplete_) { done(browserFinalizationSucceeded_); return; }
     browserFinalizationWaiters_.append(std::move(done));
     if (browserFinalized_) return;
@@ -332,6 +405,9 @@ void SebSession::finalizeBrowser(std::function<void(bool)> done, bool discardPro
 std::unique_ptr<seb::server::ServerProxy> SebSession::takeServerProxy()
 {
     serverFinalized_ = true;
+    if (screenProctoring_) {
+        screenProctoring_->stop(true);
+    }
     clipboard_->terminate();
     if (batteryController_) batteryController_->stopMonitoring();
     if (networkController_) networkController_->stopMonitoring();
@@ -395,6 +471,11 @@ seb::shell::taskbar::platform::NetworkController *SebSession::networkController(
         });
     }
     return networkController_;
+}
+
+seb::proctoring::ScreenProctoringService *SebSession::screenProctoring() const
+{
+    return screenProctoring_.get();
 }
 
 void SebSession::reportServerBattery(int percentage, bool online)
@@ -488,6 +569,10 @@ void SebSession::handleServerCookie(const QNetworkCookie &cookie)
 void SebSession::startRuntimeMonitoring()
 {
     clipboard_->initialize(configuration_.settings.Security.ClipboardPolicy);
+    const auto &sp = configuration_.settings.Proctoring.ScreenProctoring;
+    if (screenProctoring_ && sp.Enabled && !sp.ServiceUrl.trimmed().isEmpty()) {
+        screenProctoring_->start(sp);
+    }
     if (isServerSession() && serverProxy_ && !serverFinalized_) {
         serverProxy_->startConnectivity();
         const auto &battery = batteryController()->state();
@@ -506,7 +591,13 @@ BrowserWindow *SebSession::createWindow(const QUrl &url, bool isMainWindow)
     const auto &windowSettings = isMainWindow
         ? configuration_.settings.Browser.MainWindow
         : configuration_.settings.Browser.AdditionalWindow;
-    auto *window = new BrowserWindow(*this, windowSettings, url, isMainWindow);
+    QWidget *parentWidget = nullptr;
+    if (!isMainWindow) {
+        if (BrowserWindow *main = mainWindow()) {
+            parentWidget = main->workspaceWidget();
+        }
+    }
+    auto *window = new BrowserWindow(*this, windowSettings, url, isMainWindow, parentWidget);
     if (!isMainWindow) {
         window->setAttribute(Qt::WA_DeleteOnClose);
     }
@@ -633,7 +724,10 @@ bool SebSession::promptForHomeNavigation(QWidget *parent) const
     return true;
 }
 
-bool SebSession::requestApplicationQuit(QWidget *parent, const QString &reason) const
+bool SebSession::requestApplicationQuit(
+    QWidget *parent,
+    const QString &reason,
+    bool confirmWithoutPassword) const
 {
     if (!configuration_.settings.Security.AllowTermination) {
         QMessageBox::warning(
@@ -643,11 +737,26 @@ bool SebSession::requestApplicationQuit(QWidget *parent, const QString &reason) 
         return false;
     }
 
-    if (!configuration_.settings.Security.QuitPasswordHash.isEmpty()) {
+    const QString quitHash = configuration_.settings.Security.QuitPasswordHash.trimmed();
+    if (!quitHash.isEmpty()) {
         return promptForPassword(parent, QStringLiteral("Quit Password Required"), reason);
     }
 
+    if (confirmWithoutPassword) {
+        return QMessageBox::question(
+                   parent,
+                   QStringLiteral("Quit Safe Exam Browser"),
+                   QStringLiteral("Do you really want to quit Safe Exam Browser?"),
+                   QMessageBox::Yes | QMessageBox::No,
+                   QMessageBox::No) == QMessageBox::Yes;
+    }
+
     return true;
+}
+
+void SebSession::requestShutdown()
+{
+    emit shutdownRequested();
 }
 
 const seb::settings::AppSettings &SebSession::settings() const
@@ -682,14 +791,31 @@ seb::browser::contracts::IEngineProvider *SebSession::engineProvider() const
 
 QUrl SebSession::homeUrl() const
 {
-    return QUrl(configuration_.settings.Browser.HomeUrl);
+    if (configuration_.settings.Browser.UseStartUrlAsHomeUrl &&
+        configuration_.settings.Browser.HomeUrl.trimmed().isEmpty()) {
+        return initialUrl();
+    }
+
+    QUrl url(configuration_.settings.Browser.HomeUrl.trimmed());
+    if (url.scheme().compare(QStringLiteral("seb"), Qt::CaseInsensitive) == 0) {
+        url.setScheme(QStringLiteral("http"));
+    } else if (url.scheme().compare(QStringLiteral("sebs"), Qt::CaseInsensitive) == 0) {
+        url.setScheme(QStringLiteral("https"));
+    }
+    return url;
 }
 
 QUrl SebSession::initialUrl() const
 {
-    QUrl url(configuration_.settings.Browser.StartUrl);
+    QUrl url(configuration_.settings.Browser.StartUrl.trimmed());
     if (!url.isValid()) {
         return url;
+    }
+
+    if (url.scheme().compare(QStringLiteral("seb"), Qt::CaseInsensitive) == 0) {
+        url.setScheme(QStringLiteral("http"));
+    } else if (url.scheme().compare(QStringLiteral("sebs"), Qt::CaseInsensitive) == 0) {
+        url.setScheme(QStringLiteral("https"));
     }
 
     if (configuration_.settings.Browser.UseQueryParameter && !configuration_.settings.Browser.StartUrlQuery.isEmpty()) {
@@ -747,6 +873,16 @@ QList<BrowserWindow *> SebSession::browserWindows() const
     return browserWindows_;
 }
 
+BrowserWindow *SebSession::mainWindow() const
+{
+    for (BrowserWindow *window : browserWindows_) {
+        if (window && window->isMainWindow()) {
+            return window;
+        }
+    }
+    return nullptr;
+}
+
 QList<seb::applications::ExternalApplication *> SebSession::externalApplications() const
 {
     return applicationManager_ ? applicationManager_->applications() : QList<seb::applications::ExternalApplication *>{};
@@ -778,6 +914,15 @@ void SebSession::unregisterBrowserWindow(BrowserWindow *window)
 void SebSession::notifyBrowserWindowStateChanged(BrowserWindow *window)
 {
     if (window && browserWindows_.contains(window)) {
+        if (screenProctoring_ && screenProctoring_->isActive()) {
+            const QString url = window->currentUrl().toString();
+            const QString title = window->taskbarTitle();
+            if (url != lastProctoringUrl_ || title != lastProctoringTitle_) {
+                lastProctoringUrl_ = url;
+                lastProctoringTitle_ = title;
+                screenProctoring_->notifyUserAction(QStringLiteral("Browser navigated: %1").arg(title));
+            }
+        }
         emit browserWindowsChanged();
     }
 }
@@ -788,12 +933,21 @@ void SebSession::activateWindow(BrowserWindow *window)
         return;
     }
 
+    if (window->isMainWindow()) {
+        window->bringMainContentToFront();
+        window->showFullScreen();
+        window->raise();
+        window->activateWindow();
+        return;
+    }
+
     window->show();
     if (window->isMinimized()) {
         window->setWindowState(window->windowState() & ~Qt::WindowMinimized);
     }
     window->raise();
     window->activateWindow();
+    window->setFocus(Qt::ActiveWindowFocusReason);
 }
 
 void SebSession::handleDownloadRequested(seb::browser::contracts::DownloadRequest &request)
@@ -807,11 +961,23 @@ void SebSession::handleDownloadRequested(seb::browser::contracts::DownloadReques
     if (fileName.isEmpty() || fileName == QStringLiteral(".") || fileName == QStringLiteral("..")) {
         fileName = QStringLiteral("download");
     }
-    const bool sebConfig = seb::browser::ConfigurationResourceDetector::isConfigurationResource(
-        request.url, fileName, request.mimeType);
+    const QUrl startUrl(configuration_.settings.Browser.StartUrl.trimmed());
+    const bool matchesBrowserResource =
+        configuration_.isBrowserResource &&
+        startUrl.isValid() &&
+        request.url.host().compare(startUrl.host(), Qt::CaseInsensitive) == 0 &&
+        request.url.path() == startUrl.path();
+    const bool sebConfig =
+        matchesBrowserResource ||
+        seb::browser::ConfigurationResourceDetector::isConfigurationResource(
+            request.url, fileName, request.mimeType);
 
     if (sebConfig && !fileName.endsWith(QStringLiteral(".seb"), Qt::CaseInsensitive)) {
         fileName += QStringLiteral(".seb");
+    }
+
+    if (sebConfig) {
+        qDebug() << "SEB configuration download detected:" << request.url << fileName << request.mimeType;
     }
 
     if (!configuration_.settings.Browser.AllowDownloads && !sebConfig) {
@@ -959,25 +1125,40 @@ QString SebSession::defaultDownloadDirectory() const
 
 bool SebSession::promptForPassword(QWidget *parent, const QString &title, const QString &message) const
 {
-    bool accepted = false;
-    const QString password = QInputDialog::getText(
-        parent,
-        title,
-        message,
-        QLineEdit::Password,
-        QString(),
-        &accepted);
-
-    if (!accepted) {
-        return false;
-    }
-
-    const QByteArray digest = QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256);
-    const QString hash = QString::fromLatin1(digest.toHex());
-    if (hash.compare(configuration_.settings.Security.QuitPasswordHash, Qt::CaseInsensitive) == 0) {
+    const QString expectedHash = configuration_.settings.Security.QuitPasswordHash.trimmed();
+    if (expectedHash.isEmpty()) {
         return true;
     }
 
-    QMessageBox::warning(parent, title, QStringLiteral("The entered quit password is invalid."));
-    return false;
+    const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
+    const bool expectedIsSha256 = sha256Pattern.match(expectedHash).hasMatch();
+
+    while (true) {
+        bool accepted = false;
+        const QString password = QInputDialog::getText(
+            parent,
+            title,
+            message,
+            QLineEdit::Password,
+            QString(),
+            &accepted);
+
+        if (!accepted) {
+            return false;
+        }
+
+        const QByteArray digest = QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256);
+        const QString hash = QString::fromLatin1(digest.toHex());
+        const bool valid = expectedIsSha256
+            ? (hash.compare(expectedHash, Qt::CaseInsensitive) == 0)
+            : (hash.compare(expectedHash, Qt::CaseInsensitive) == 0 || password == expectedHash);
+        if (valid) {
+            return true;
+        }
+
+        QMessageBox::warning(
+            parent,
+            title,
+            QStringLiteral("The entered quit password is invalid. Please try again."));
+    }
 }

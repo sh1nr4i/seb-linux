@@ -46,6 +46,7 @@ private:
     seb::shell::taskbar::platform::BatteryController *batteryController_ = nullptr;
     seb::shell::taskbar::platform::KeyboardController *keyboardController_ = nullptr;
     RaiseHandControl *raiseHandControl_ = nullptr;
+    NotificationControl *proctoringControl_ = nullptr;
 };
 
 }  // namespace seb::ui::taskbar

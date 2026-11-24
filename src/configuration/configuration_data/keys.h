@@ -209,6 +209,7 @@ inline const QString CacheSize = QStringLiteral("screenProctoringCacheSize");
 inline const QString ClientId = QStringLiteral("screenProctoringClientId");
 inline const QString ClientSecret = QStringLiteral("screenProctoringClientSecret");
 inline const QString Enabled = QStringLiteral("enableScreenProctoring");
+inline const QString EncryptionSecret = QStringLiteral("screenProctoringEncryptSecret");
 inline const QString GroupId = QStringLiteral("screenProctoringGroupId");
 inline const QString ImageDownscaling = QStringLiteral("screenProctoringImageDownscale");
 inline const QString ImageFormat = QStringLiteral("screenProctoringImageFormat");

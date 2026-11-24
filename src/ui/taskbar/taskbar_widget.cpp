@@ -18,6 +18,7 @@
 #include "../../shell/taskbar/platform/network_controller.h"
 #include "../../applications/external_application.h"
 #include "../../shell/taskbar/taskbar_service.h"
+#include "../../proctoring/screen_proctoring_service.h"
 #include "../../seb_session.h"
 
 #include <QFrame>
@@ -32,7 +33,19 @@ TaskbarWidget::TaskbarWidget(SebSession &session, QWidget *parent)
 {
     setFixedHeight(kTaskbarHeight);
     setAutoFillBackground(true);
-    setStyleSheet(QStringLiteral("background:%1; color:black;").arg(backgroundColor().name()));
+    setAttribute(Qt::WA_StyledBackground, true);
+    QPalette lightPalette = palette();
+    lightPalette.setColor(QPalette::Window, backgroundColor());
+    lightPalette.setColor(QPalette::Base, backgroundColor());
+    lightPalette.setColor(QPalette::Button, backgroundColor());
+    lightPalette.setColor(QPalette::WindowText, Qt::black);
+    lightPalette.setColor(QPalette::Text, Qt::black);
+    lightPalette.setColor(QPalette::ButtonText, Qt::black);
+    setPalette(lightPalette);
+    setStyleSheet(QStringLiteral(
+        "QWidget { background: %1; color: black; }"
+        "QLabel { background: transparent; color: black; }")
+                      .arg(backgroundColor().name()));
 
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -100,6 +113,34 @@ TaskbarWidget::TaskbarWidget(SebSession &session, QWidget *parent)
             QStringLiteral("SEB Verificator"),
             false,
             notificationContainer));
+    }
+    if (model.showProctoring) {
+        proctoringControl_ = new NotificationControl(
+            QStringLiteral(":/assets/taskbar/proctoring.svg"),
+            QStringLiteral("Screen Proctoring (Window only): Inactive"),
+            false,
+            true,
+            notificationContainer);
+        notificationLayout->addWidget(proctoringControl_);
+        if (auto *sp = session_.screenProctoring()) {
+            auto updateProctoringIndicator = [this, sp]() {
+                if (!proctoringControl_) {
+                    return;
+                }
+                const bool visible =
+                    sp->state() != seb::proctoring::ScreenProctoringService::State::Inactive;
+                proctoringControl_->setVisible(visible);
+                proctoringControl_->setActive(sp->isActive());
+                proctoringControl_->setToolTipText(sp->statusText());
+            };
+            connect(sp, &seb::proctoring::ScreenProctoringService::stateChanged,
+                    this, [updateProctoringIndicator](seb::proctoring::ScreenProctoringService::State, const QString &) {
+                        updateProctoringIndicator();
+                    });
+            updateProctoringIndicator();
+        } else {
+            proctoringControl_->setVisible(false);
+        }
     }
     if (session_.isServerSession() && settings.Server.Invigilation.ShowRaiseHandNotification) {
         raiseHandControl_ = new RaiseHandControl(notificationContainer);

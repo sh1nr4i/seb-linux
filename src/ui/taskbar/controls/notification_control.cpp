@@ -27,4 +27,18 @@ NotificationControl::NotificationControl(
     layout->addWidget(button_);
 }
 
+void NotificationControl::setToolTipText(const QString &toolTip)
+{
+    if (button_) {
+        button_->setToolTip(toolTip);
+    }
+}
+
+void NotificationControl::setActive(bool active)
+{
+    if (button_) {
+        button_->setEnabled(active);
+    }
+}
+
 }  // namespace seb::ui::taskbar

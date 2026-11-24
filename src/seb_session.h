@@ -50,6 +50,10 @@ namespace seb::server {
 class ServerProxy;
 }
 
+namespace seb::proctoring {
+class ScreenProctoringService;
+}
+
 class SebSession : public QObject
 {
     Q_OBJECT
@@ -73,7 +77,11 @@ public:
     bool isPopupAllowed(const QUrl &opener, const QUrl &target, bool *openInSameWindow) const;
     bool isQuitUrl(const QUrl &url) const;
     bool promptForHomeNavigation(QWidget *parent) const;
-    bool requestApplicationQuit(QWidget *parent, const QString &reason) const;
+    bool requestApplicationQuit(
+        QWidget *parent,
+        const QString &reason,
+        bool confirmWithoutPassword = true) const;
+    void requestShutdown();
     const seb::settings::AppSettings &settings() const;
     const seb::configuration::contracts::SessionConfiguration &configuration() const;
     seb::configuration::contracts::cryptography::IKeyGenerator *keyGenerator() const;
@@ -87,6 +95,7 @@ public:
     bool isMainNavigationAllowed(const QUrl &url) const;
     bool openSebResource(const QUrl &url, QWidget *parent) const;
     QList<BrowserWindow *> browserWindows() const;
+    BrowserWindow *mainWindow() const;
     QList<seb::applications::ExternalApplication *> externalApplications() const;
     void registerBrowserWindow(BrowserWindow *window);
     void unregisterBrowserWindow(BrowserWindow *window);
@@ -99,6 +108,7 @@ public:
     void lowerServerHand(std::function<void(bool)> done);
     seb::shell::taskbar::platform::BatteryController *batteryController();
     seb::shell::taskbar::platform::NetworkController *networkController();
+    seb::proctoring::ScreenProctoringService *screenProctoring() const;
     void reportServerBattery(int percentage, bool online);
     void reportServerWireless(int signal);
 
@@ -150,4 +160,7 @@ private:
     bool identityLookupInFlight_ = false;
     seb::shell::taskbar::platform::BatteryController *batteryController_ = nullptr;
     seb::shell::taskbar::platform::NetworkController *networkController_ = nullptr;
+    std::unique_ptr<seb::proctoring::ScreenProctoringService> screenProctoring_;
+    QString lastProctoringUrl_;
+    QString lastProctoringTitle_;
 };

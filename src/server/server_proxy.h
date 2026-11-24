@@ -61,6 +61,7 @@ signals:
     void lockScreenRequested(const QString &message);
     void lockScreenConfirmed();
     void handConfirmed();
+    void screenProctoringInstructionReceived(const seb::server::data::ProctoringInstruction &instruction);
 
 private:
     void execute(

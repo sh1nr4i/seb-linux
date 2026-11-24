@@ -11,6 +11,7 @@ void ProctoringDataMapper::map(const QString &key, const QVariant &value, seb::s
     auto &screen = p.ScreenProctoring;
     if (key == keys::Proctoring::ScreenProctoring::ClientId) screen.ClientId = string(value, screen.ClientId);
     else if (key == keys::Proctoring::ScreenProctoring::ClientSecret) screen.ClientSecret = string(value, screen.ClientSecret);
+    else if (key == keys::Proctoring::ScreenProctoring::EncryptionSecret) screen.EncryptionSecret = string(value, screen.EncryptionSecret);
     else if (key == keys::Proctoring::ScreenProctoring::ServiceUrl) screen.ServiceUrl = string(value, screen.ServiceUrl);
     else if (key == keys::Proctoring::ScreenProctoring::CacheSize) screen.CacheSize = integer(value, screen.CacheSize);
     else if (key == keys::Proctoring::ScreenProctoring::Enabled) screen.Enabled = boolean(value, screen.Enabled);

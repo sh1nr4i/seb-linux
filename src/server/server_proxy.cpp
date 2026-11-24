@@ -440,8 +440,11 @@ void ServerProxy::performPing()
         if (!confirmation.isEmpty() && !instructionConfirmations_.isEmpty()) instructionConfirmations_.dequeue();
         data::InstructionData instruction;
         if (Parser::parseInstruction(response.body, instruction)) {
-            const bool supported = instruction.instruction != data::Instruction::Proctoring &&
-                instruction.instruction != data::Instruction::ProctoringReconfiguration;
+            const bool supported =
+                (instruction.instruction != data::Instruction::Proctoring &&
+                 instruction.instruction != data::Instruction::ProctoringReconfiguration) ||
+                (instruction.instruction == data::Instruction::Proctoring &&
+                 instruction.proctoring.provider == data::ProctoringProvider::ScreenProctoring);
             handleInstruction(instruction);
             if (supported && !instruction.confirmation.isEmpty() && !instructionConfirmations_.contains(instruction.confirmation))
                 instructionConfirmations_.enqueue(instruction.confirmation);
@@ -465,6 +468,11 @@ void ServerProxy::handleInstruction(const data::InstructionData &instruction)
         }
         break;
     case data::Instruction::Proctoring:
+        if (instruction.proctoring.provider == data::ProctoringProvider::ScreenProctoring) {
+            emit screenProctoringInstructionReceived(instruction.proctoring);
+            break;
+        }
+        [[fallthrough]];
     case data::Instruction::ProctoringReconfiguration:
         logEvent(QStringLiteral("Requested proctoring capability is unavailable on Linux."), QStringLiteral("ERROR"));
         emit lockScreenRequested(QStringLiteral("The server requires an unsupported proctoring capability. Contact your invigilator."));
