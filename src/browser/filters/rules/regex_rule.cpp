@@ -14,7 +14,7 @@ bool RegexRule::isValid() const
 
 bool RegexRule::isMatch(const QUrl &url) const
 {
-    return expression_.match(url.toString(QUrl::FullyDecoded)).hasMatch();
+    return expression_.match(QUrl::fromPercentEncoding(url.toEncoded())).hasMatch();
 }
 
 }  // namespace seb::browser::filters::rules

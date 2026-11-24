@@ -7,13 +7,21 @@ bool ConfigurationResourceDetector::isConfigurationResource(
     const QString &suggestedFileName,
     const QString &mimeType)
 {
+    const QString decodedPath = url.path(QUrl::FullyDecoded);
+    const QString mimeBase = mimeType.section(QLatin1Char(';'), 0, 0).trimmed();
+    const bool isDownloadContext = !suggestedFileName.isEmpty() || !mimeBase.isEmpty();
+    const bool schemeMatch = url.scheme().compare(QStringLiteral("seb"), Qt::CaseInsensitive) == 0 ||
+                             url.scheme().compare(QStringLiteral("sebs"), Qt::CaseInsensitive) == 0;
     const bool fileNameMatch = suggestedFileName.endsWith(QStringLiteral(".seb"), Qt::CaseInsensitive);
-    const bool pathMatch = url.path(QUrl::FullyDecoded).endsWith(QStringLiteral(".seb"), Qt::CaseInsensitive);
-    const bool mimeMatch = mimeType.trimmed().compare(QStringLiteral("application/seb"), Qt::CaseInsensitive) == 0;
-    const bool dataMatch = url.toString(QUrl::FullyDecoded).contains(
+    const bool pathMatch = decodedPath.endsWith(QStringLiteral(".seb"), Qt::CaseInsensitive) ||
+                           (isDownloadContext &&
+                            decodedPath.endsWith(QStringLiteral("/accessrule/seb/config.php"), Qt::CaseInsensitive));
+    const bool mimeMatch = mimeBase.compare(QStringLiteral("application/seb"), Qt::CaseInsensitive) == 0 ||
+                           mimeBase.compare(QStringLiteral("application/x-seb"), Qt::CaseInsensitive) == 0;
+    const bool dataMatch = QUrl::fromPercentEncoding(url.toEncoded()).contains(
         QStringLiteral("application/seb"), Qt::CaseInsensitive);
 
-    return fileNameMatch || pathMatch || mimeMatch || dataMatch;
+    return schemeMatch || fileNameMatch || pathMatch || mimeMatch || dataMatch;
 }
 
 QUrl ConfigurationResourceDetector::downloadUrl(const QUrl &url)

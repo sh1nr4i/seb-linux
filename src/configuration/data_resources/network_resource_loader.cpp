@@ -21,8 +21,16 @@ bool NetworkResourceLoader::canLoad(const QUrl &resource) const
 
 contracts::LoadStatus NetworkResourceLoader::tryLoad(const QUrl &resource, QByteArray &data) const
 {
+    QUrl requestUrl = resource;
+    if (requestUrl.scheme().compare(appConfig_.sebUriScheme, Qt::CaseInsensitive) == 0) {
+        requestUrl.setScheme(QStringLiteral("http"));
+    } else if (requestUrl.scheme().compare(appConfig_.sebUriSchemeSecure, Qt::CaseInsensitive) == 0) {
+        requestUrl.setScheme(QStringLiteral("https"));
+    }
+
     QNetworkAccessManager manager;
-    QNetworkRequest request(resource);
+    QNetworkRequest request(requestUrl);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     auto *reply = manager.get(request);
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);

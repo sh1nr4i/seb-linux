@@ -79,13 +79,13 @@ void BrowserDataMapper::map(const QString &key, const QVariant &value, seb::sett
     else if (key == keys::Browser::Filter::FilterRules) mapFilter(browser.Filter, value);
     else if (key == keys::Browser::HomeButtonMessage) browser.HomeNavigationMessage = string(value, browser.HomeNavigationMessage);
     else if (key == keys::Browser::HomeButtonRequiresPassword) browser.HomeNavigationRequiresPassword = boolean(value, browser.HomeNavigationRequiresPassword);
-    else if (key == keys::Browser::HomeButtonUrl) browser.HomeUrl = string(value, browser.HomeUrl);
-    else if (key == keys::Browser::QuitUrl) browser.QuitUrl = string(value, browser.QuitUrl);
+    else if (key == keys::Browser::HomeButtonUrl) browser.HomeUrl = string(value, browser.HomeUrl).trimmed();
+    else if (key == keys::Browser::QuitUrl) browser.QuitUrl = string(value, browser.QuitUrl).trimmed();
     else if (key == keys::Browser::QuitUrlConfirmation) browser.ConfirmQuitUrl = boolean(value, browser.ConfirmQuitUrl);
     else if (key == keys::Browser::ResetOnQuitUrl) browser.ResetOnQuitUrl = boolean(value, browser.ResetOnQuitUrl);
     else if (key == keys::Browser::SendCustomHeaders) { browser.SendBrowserExamKey = boolean(value, browser.SendBrowserExamKey); browser.SendConfigurationKey = browser.SendBrowserExamKey; }
     else if (key == keys::Browser::ShowFileSystemElementPath) browser.ShowFileSystemElementPath = boolean(value, browser.ShowFileSystemElementPath);
-    else if (key == keys::Browser::StartUrl) browser.StartUrl = string(value, browser.StartUrl);
+    else if (key == keys::Browser::StartUrl) browser.StartUrl = string(value, browser.StartUrl).trimmed();
     else if (key == keys::Browser::UseStartUrlQuery) browser.UseQueryParameter = boolean(value, browser.UseQueryParameter);
     else if (key == keys::Browser::UserAgentSuffix) browser.UserAgentSuffix = string(value, browser.UserAgentSuffix);
     else if (key == keys::Browser::HomeButtonUseStartUrl) browser.UseStartUrlAsHomeUrl = boolean(value, browser.UseStartUrlAsHomeUrl);

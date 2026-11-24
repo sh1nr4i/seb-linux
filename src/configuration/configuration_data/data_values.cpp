@@ -105,11 +105,11 @@ seb::settings::AppSettings DataValues::loadDefaultSettings() const
     settings.Display.IgnoreError = false;
     settings.Display.InternalDisplayOnly = false;
     settings.Security.AllowTermination = true;
-    settings.Security.AllowWindowCapture = false;
+    settings.Security.AllowWindowCapture = true;
     settings.Security.ClipboardPolicy = seb::settings::security::ClipboardPolicy::Isolated;
     settings.Security.VirtualMachinePolicy = seb::settings::security::VirtualMachinePolicy::Deny;
-    settings.Security.KioskMode = seb::settings::security::KioskMode::CreateNewDesktop;
-    settings.Security.VerifyCursorConfiguration = true;
+    settings.Security.KioskMode = seb::settings::security::KioskMode::None;
+    settings.Security.VerifyCursorConfiguration = false;
     settings.Security.VerifySessionIntegrity = true;
     settings.SessionMode = seb::settings::SessionMode::Normal;
     settings.ConfigurationMode = seb::settings::ConfigurationMode::Exam;
@@ -129,9 +129,10 @@ seb::settings::AppSettings DataValues::loadDefaultSettings() const
     settings.Proctoring.ScreenProctoring.MetaData.CaptureApplicationData = true;
     settings.Proctoring.ScreenProctoring.MetaData.CaptureBrowserData = true;
     settings.Proctoring.ScreenProctoring.MetaData.CaptureWindowTitle = true;
-    settings.Service.DisableUserLock = true;
-    settings.Service.DisableUserSwitch = true;
-    settings.Service.Policy = seb::settings::service::ServicePolicy::Mandatory;
+    settings.Service.DisableUserLock = false;
+    settings.Service.DisableUserSwitch = false;
+    settings.Service.IgnoreService = true;
+    settings.Service.Policy = seb::settings::service::ServicePolicy::Optional;
     return settings;
 }
 
