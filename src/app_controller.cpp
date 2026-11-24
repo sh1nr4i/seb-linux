@@ -273,6 +273,22 @@ bool AppController::eventFilter(QObject *watched, QEvent *event)
             if (abortServerWorkflow_) abortServerWorkflow_();
             return true;
         }
+        if (shuttingDown_) {
+            return true;
+        }
+        if (session_) {
+            QTimer::singleShot(0, this, [this] {
+                if (shuttingDown_ || !session_) {
+                    return;
+                }
+                if (session_->requestApplicationQuit(
+                        mainWindow_,
+                        QStringLiteral("Enter the quit password to close this exam session."))) {
+                    shutdown();
+                }
+            });
+            return true;
+        }
         QTimer::singleShot(0, this, &AppController::shutdown);
         return true;
     }
@@ -307,8 +323,10 @@ void AppController::completeShutdown()
         return;
     }
     if (session_) {
-        const auto windows = session_->browserWindows();
-        for (auto *window : windows) delete window;
+        QList<QPointer<BrowserWindow>> windows;
+        for (auto *window : session_->browserWindows()) windows.append(window);
+        for (const auto &window : windows) if (window && !window->isMainWindow()) delete window;
+        for (const auto &window : windows) if (window) delete window;
         mainWindow_ = nullptr;
         if (!browserShutdownFinalizationStarted_) {
             browserShutdownFinalizationStarted_ = true;
@@ -340,8 +358,21 @@ void AppController::completeShutdown()
     QCoreApplication::quit();
 }
 
+#if defined(SEB_DEV_BYPASS_OPTION)
+void AppController::setDevBypass(bool enabled)
+{
+    devBypass_ = enabled;
+}
+#endif
+
 bool AppController::validateSecuritySettings(const seb::settings::AppSettings &settings, QString *error)
 {
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (devBypass_) {
+        qWarning() << "Developer bypass active; skipping strict security validation.";
+        return true;
+    }
+#endif
     return security_->validateSettings(settings, error);
 }
 
@@ -695,16 +726,32 @@ bool AppController::launch(const QString &resource, QString *error)
             settings.Applications.Whitelist.clear();
             settings.Browser.DeleteCacheOnShutdown = false;
             settings.Browser.DeleteCookiesOnShutdown = false;
-            settings.Browser.StartUrl = targetResource.toString();
+            QUrl browserUrl = targetResource;
+            if (browserUrl.scheme().compare(QStringLiteral("seb"), Qt::CaseInsensitive) == 0) {
+                browserUrl.setScheme(QStringLiteral("http"));
+            } else if (browserUrl.scheme().compare(QStringLiteral("sebs"), Qt::CaseInsensitive) == 0) {
+                browserUrl.setScheme(QStringLiteral("https"));
+            }
+            settings.Browser.StartUrl = browserUrl.toString();
+            settings.Browser.MainWindow.ShowToolbar = false;
+            settings.Browser.MainWindow.FullScreenMode = true;
+            settings.Browser.MainWindow.AllowBackwardNavigation = true;
+            settings.Browser.MainWindow.AllowForwardNavigation = true;
+            settings.Browser.MainWindow.AllowReloading = true;
+            settings.Browser.MainWindow.ShowReloadButton = false;
+            settings.Browser.MainWindow.ShowReloadWarning = false;
+            settings.Browser.MainWindow.UrlPolicy = seb::settings::browser::UrlPolicy::Never;
             settings.Display.AllowedDisplays = 10;
             settings.Display.IgnoreError = true;
             settings.Display.InternalDisplayOnly = false;
             settings.Security.AllowReconfiguration = true;
+            settings.Security.AllowWindowCapture = true;
+            settings.Security.KioskMode = seb::settings::security::KioskMode::None;
             settings.Security.VirtualMachinePolicy = seb::settings::security::VirtualMachinePolicy::Allow;
             settings.Service.IgnoreService = true;
             settings.Security.VerifySessionIntegrity = false;
             settings.Security.VerifyCursorConfiguration = false;
-            settings.UserInterface.ActionCenter.EnableActionCenter = false;
+            settings.UserInterface.ActionCenter.EnableActionCenter = true;
         } else if (status != seb::configuration::contracts::LoadStatus::Success) {
             if (error) {
                 *error = loadStatusMessage(status);
@@ -838,6 +885,19 @@ bool AppController::applySettings(
 {
     if (!seb::browser::applyWebEngineEnvironment(configuration.settings.Browser, error)) return false;
     if (!session_) return commitSettings(configuration, warnings, error);
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (!devBypass_) {
+        if (!sessionIntegrityStore_->prepare(
+                configuration.settings.Browser.ConfigurationKey,
+                !configuration.settings.Security.QuitPasswordHash.isEmpty(),
+                configuration.settings.Security.VerifySessionIntegrity,
+                error)) {
+            if (error && !error->isEmpty())
+                QMessageBox::critical(mainWindow_, QStringLiteral("Session integrity check failed"), *error);
+            return false;
+        }
+    }
+#else
     if (!sessionIntegrityStore_->prepare(
             configuration.settings.Browser.ConfigurationKey,
             !configuration.settings.Security.QuitPasswordHash.isEmpty(),
@@ -847,11 +907,14 @@ bool AppController::applySettings(
             QMessageBox::critical(mainWindow_, QStringLiteral("Session integrity check failed"), *error);
         return false;
     }
+#endif
     transitionPending_ = true;
     QTimer::singleShot(0, this, [this, configuration, warnings] {
         if (shuttingDown_) return;
-        const auto windows = session_->browserWindows();
-        for (auto *window : windows) delete window;
+        QList<QPointer<BrowserWindow>> windows;
+        for (auto *window : session_->browserWindows()) windows.append(window);
+        for (const auto &window : windows) if (window && !window->isMainWindow()) delete window;
+        for (const auto &window : windows) if (window) delete window;
         mainWindow_ = nullptr;
         const auto &old = session_->configuration();
         const bool discardProfile = ephemeralBrowserProfile_ && !old.isBrowserResource &&
@@ -908,6 +971,29 @@ bool AppController::commitSettings(
     }
     if (!ensureBrowserProfileContext(settings.Browser, error)) return false;
     const bool hasQuitPassword = !settings.Security.QuitPasswordHash.isEmpty();
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (!devBypass_) {
+        if (!sessionIntegrityStore_->prepare(
+                settings.Browser.ConfigurationKey,
+                hasQuitPassword,
+                settings.Security.VerifySessionIntegrity,
+                error)) {
+            if (error && !error->isEmpty())
+                QMessageBox::critical(mainWindow_, QStringLiteral("Session integrity check failed"), *error);
+            return false;
+        }
+        if (!security_->configure(settings, error)) return false;
+        if (!sessionIntegrityStore_->activate(
+                settings.Browser.ConfigurationKey,
+                hasQuitPassword,
+                settings.Security.VerifySessionIntegrity,
+                error)) {
+            if (error && !error->isEmpty())
+                QMessageBox::critical(mainWindow_, QStringLiteral("Session integrity check failed"), *error);
+            return false;
+        }
+    }
+#else
     if (!sessionIntegrityStore_->prepare(
             settings.Browser.ConfigurationKey,
             hasQuitPassword,
@@ -927,6 +1013,7 @@ bool AppController::commitSettings(
             QMessageBox::critical(mainWindow_, QStringLiteral("Session integrity check failed"), *error);
         return false;
     }
+#endif
 
     if (!runtimeWindow_) {
         runtimeWindow_ = std::make_unique<RuntimeWindow>();
@@ -959,12 +1046,20 @@ bool AppController::commitSettings(
     BrowserWindow *nextWindow = nextSession->createWindow(nextSession->initialUrl(), true);
     runtimeWindow_->setStatusText(QStringLiteral("Opening secure browser window"));
 
-    nextWindow->show();
+    nextWindow->showFullScreen();
     runtimeWindow_->hide();
 
     mainWindow_ = nextWindow;
     session_ = std::move(nextSession);
     session_->startRuntimeMonitoring();
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (!devBypass_) {
+        security_->startMonitoring();
+    } else {
+        qWarning() << "Developer bypass active; security monitoring disabled.";
+    }
+#else
     security_->startMonitoring();
+#endif
     return true;
 }

@@ -37,6 +37,9 @@ public:
 
     void shutdown();
     bool launch(const QString &resource, QString *error);
+#if defined(SEB_DEV_BYPASS_OPTION)
+    void setDevBypass(bool enabled);
+#endif
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -90,4 +93,7 @@ private:
     bool sessionIntegrityCleanupAllowed_ = true;
     bool reconfigurationInProgress_ = false;
     bool transitionPending_ = false;
+#if defined(SEB_DEV_BYPASS_OPTION)
+    bool devBypass_ = false;
+#endif
 };

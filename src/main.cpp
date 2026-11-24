@@ -44,11 +44,27 @@ bool validateEngineEnvironment(int argc, char *argv[])
     return true;
 }
 
+#if defined(SEB_DEV_BYPASS_OPTION)
+bool hasDevBypassArgument(int argc, char *argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--dev-bypass")) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 }
 
 int main(int argc, char *argv[])
 {
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (!hasDevBypassArgument(argc, argv) && !validateEngineEnvironment(argc, argv)) return 1;
+#else
     if (!validateEngineEnvironment(argc, argv)) return 1;
+#endif
 
     QApplication app(argc, argv);
 
@@ -68,6 +84,11 @@ int main(int argc, char *argv[])
         QStringList{QStringLiteral("c"), QStringLiteral("config")},
         QStringLiteral("Load settings from a JSON file or an unencrypted XML plist .seb file."),
         QStringLiteral("file")));
+#if defined(SEB_DEV_BYPASS_OPTION)
+    parser.addOption(QCommandLineOption(
+        QStringList{QStringLiteral("dev-bypass")},
+        QStringLiteral("Skip strict lockdowns and environment checks for development purposes.")));
+#endif
 
     parser.addPositionalArgument(
         QStringLiteral("resource"),
@@ -88,6 +109,11 @@ int main(int argc, char *argv[])
         : (parser.positionalArguments().isEmpty() ? QString() : parser.positionalArguments().constFirst());
 
     AppController controller;
+#if defined(SEB_DEV_BYPASS_OPTION)
+    if (parser.isSet(QStringLiteral("dev-bypass"))) {
+        controller.setDevBypass(true);
+    }
+#endif
     QString launchError;
     if (!controller.launch(resource, &launchError)) {
         if (!launchError.isEmpty()) {

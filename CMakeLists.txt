@@ -27,6 +27,7 @@ endif()
 option(SEB_FORCE_QTWEBENGINE "Force the Qt WebEngine backend" OFF)
 option(SEB_FORCE_WEBKITGTK "Force the WebKitGTK backend" OFF)
 option(SEB_ENABLE_WEBKITGTK_COMPAT "Enable the non-production WebKitGTK compatibility backend" OFF)
+option(SEB_DEV "Enable development build features (--dev-bypass CLI option)" OFF)
 
 if(SEB_FORCE_QTWEBENGINE AND SEB_FORCE_WEBKITGTK)
     message(FATAL_ERROR "SEB_FORCE_QTWEBENGINE and SEB_FORCE_WEBKITGTK cannot be used together.")
@@ -185,8 +186,10 @@ set(SEB_SOURCES
     src/ui/taskbar/controls/raise_hand_control.cpp
     src/ui/taskbar/controls/window_list_popup.cpp
     src/ui/taskbar/taskbar_widget.cpp
+    src/ui/action_center_sidebar.cpp
     src/ui/runtime_window.cpp
     src/ui/seb_taskbar.cpp
+    src/proctoring/screen_proctoring_service.cpp
     src/seb_session.cpp
     src/security/security_service.cpp
     src/security/session_integrity_store.cpp
@@ -402,8 +405,10 @@ set(SEB_HEADERS
     src/ui/taskbar/controls/raise_hand_control.h
     src/ui/taskbar/controls/window_list_popup.h
     src/ui/taskbar/taskbar_widget.h
+    src/ui/action_center_sidebar.h
     src/ui/runtime_window.h
     src/ui/seb_taskbar.h
+    src/proctoring/screen_proctoring_service.h
     src/seb_session.h
     src/security/security_service.h
     src/security/session_integrity_store.h
@@ -437,6 +442,10 @@ target_compile_definitions(safe-exam-browser PRIVATE
     SEB_HAS_ANY_ENGINE=${SEB_HAS_ANY_ENGINE}
     SEB_HAS_LIBSECRET=${SEB_HAS_LIBSECRET}
 )
+
+if(SEB_DEV)
+    target_compile_definitions(safe-exam-browser PRIVATE SEB_DEV_BYPASS_OPTION=1)
+endif()
 
 target_link_libraries(safe-exam-browser PRIVATE
     Qt6::Core
