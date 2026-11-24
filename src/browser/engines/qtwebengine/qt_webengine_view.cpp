@@ -282,17 +282,39 @@ void QtWebEngineWebView::print()
 
 bool QtWebEngineWebView::eventFilter(QObject *watched, QEvent *event)
 {
+    if (!event) {
+        return QObject::eventFilter(watched, event);
+    }
+
+    const QEvent::Type type = event->type();
+    switch (type) {
+    case QEvent::DragEnter:
+    case QEvent::DragMove:
+    case QEvent::Drop:
+    case QEvent::ContextMenu:
+    case QEvent::NativeGesture:
+    case QEvent::Wheel:
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
+    case QEvent::ShortcutOverride:
+    case QEvent::KeyPress:
+    case QEvent::KeyRelease:
+        break;
+    default:
+        return QObject::eventFilter(watched, event);
+    }
+
     auto *widget = qobject_cast<QWidget *>(watched);
-    if (!event || !widget || widget->window() != view_->window() ||
+    if (!widget || widget->window() != view_->window() ||
         (widget != view_ && !view_->isAncestorOf(widget)))
         return QObject::eventFilter(watched, event);
-    if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove || event->type() == QEvent::Drop) {
+    if (type == QEvent::DragEnter || type == QEvent::DragMove || type == QEvent::Drop) {
         event->ignore();
         return true;
     }
-    if (event->type() == QEvent::ContextMenu) return true;
-    if (event->type() == QEvent::NativeGesture && configured_ && !settings_.AllowPageZoom) return true;
-    if (event->type() == QEvent::Wheel) {
+    if (type == QEvent::ContextMenu) return true;
+    if (type == QEvent::NativeGesture && configured_ && !settings_.AllowPageZoom) return true;
+    if (type == QEvent::Wheel) {
         auto *wheel = static_cast<QWheelEvent *>(event);
         if (wheel->modifiers().testFlag(Qt::ControlModifier)) {
             if (wheel->angleDelta().y() != 0)
@@ -301,7 +323,7 @@ bool QtWebEngineWebView::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
-    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
+    if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease) {
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (configured_ && ((mouse->button() == Qt::MiddleButton &&
              (!mouseSettings_.AllowMiddleButton || clipboardPolicy_ != seb::settings::security::ClipboardPolicy::Allow)) ||
@@ -310,19 +332,28 @@ bool QtWebEngineWebView::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
         if (mouse->button() == Qt::BackButton || mouse->button() == Qt::ForwardButton) {
-            if (event->type() == QEvent::MouseButtonRelease)
+            if (type == QEvent::MouseButtonRelease)
                 emit commandRequested(mouse->button() == Qt::BackButton ? Command::Back : Command::Forward);
             event->accept();
             return true;
         }
     }
-    if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease)
+    if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress && type != QEvent::KeyRelease)
         return QObject::eventFilter(watched, event);
     auto *key = static_cast<QKeyEvent *>(event);
     const auto modifiers = key->modifiers();
     const bool ctrl = modifiers.testFlag(Qt::ControlModifier);
     const bool alt = modifiers.testFlag(Qt::AltModifier);
     const bool shift = modifiers.testFlag(Qt::ShiftModifier);
+    const bool meta = modifiers.testFlag(Qt::MetaModifier);
+    if ((meta && !ctrl && !alt && key->key() == Qt::Key_A) ||
+        (ctrl && shift && !alt && key->key() == Qt::Key_A)) {
+        event->accept();
+        if (type == QEvent::KeyPress && !key->isAutoRepeat()) {
+            emit commandRequested(Command::ToggleActionCenter);
+        }
+        return true;
+    }
     if (configured_) {
         const bool functionKeys[] = {keyboardSettings_.AllowF1, keyboardSettings_.AllowF2, keyboardSettings_.AllowF3,
             keyboardSettings_.AllowF4, keyboardSettings_.AllowF5, keyboardSettings_.AllowF6, keyboardSettings_.AllowF7,
@@ -347,7 +378,7 @@ bool QtWebEngineWebView::eventFilter(QObject *watched, QEvent *event)
                 clipboardCommand == QStringLiteral("cut") ? keyboardSettings_.AllowCtrlX : keyboardSettings_.AllowCtrlV;
             if (!keyAllowed || clipboardPolicy_ == seb::settings::security::ClipboardPolicy::Block) return true;
             if (clipboardPolicy_ == seb::settings::security::ClipboardPolicy::Isolated) {
-                if (clipboardCommand_ && event->type() == QEvent::KeyPress && !key->isAutoRepeat()) clipboardCommand_(clipboardCommand);
+                if (clipboardCommand_ && type == QEvent::KeyPress && !key->isAutoRepeat()) clipboardCommand_(clipboardCommand);
                 return true;
             }
             event->ignore();
@@ -365,10 +396,10 @@ bool QtWebEngineWebView::eventFilter(QObject *watched, QEvent *event)
     else if (ctrl && !alt && key->key() == Qt::Key_Minus) command = Command::ZoomOut;
     else if (ctrl && !alt && key->key() == Qt::Key_0) command = Command::ZoomReset;
     else if (key->key() == Qt::Key_F12 || (ctrl && shift && (key->key() == Qt::Key_I || key->key() == Qt::Key_J))) command = Command::DeveloperTools;
-    else if (ctrl && shift && key->key() == Qt::Key_Q) command = Command::Quit;
+    else if (ctrl && !alt && key->key() == Qt::Key_Q) command = Command::Quit;
     if (command) {
         event->accept();
-        if (event->type() == QEvent::KeyPress && !key->isAutoRepeat()) emit commandRequested(*command);
+        if (type == QEvent::KeyPress && !key->isAutoRepeat()) emit commandRequested(*command);
         return true;
     }
     if (key->key() == Qt::Key_F11 || (ctrl && (key->key() == Qt::Key_U || key->key() == Qt::Key_S || key->key() == Qt::Key_O))) {

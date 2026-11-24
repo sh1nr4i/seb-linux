@@ -46,7 +46,8 @@ public:
      * For WebEngine this is the QWebEngineView. For WebKitGTK this is a QWindow container widget.
      */
     enum class Command { Back, Forward, Reload, Find, Home, FocusAddressBar,
-                         ZoomIn, ZoomOut, ZoomReset, Print, DeveloperTools, Quit };
+                         ZoomIn, ZoomOut, ZoomReset, Print, DeveloperTools, Quit,
+                         ToggleActionCenter };
     Q_ENUM(Command)
 
     virtual QWidget *widget() const = 0;

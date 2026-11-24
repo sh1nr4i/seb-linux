@@ -57,9 +57,12 @@
         }
     };
 
-    updateKeys();
-    document.addEventListener('seb-security-bridge-ready', updateKeys);
-    window.addEventListener('popstate', updateKeys);
+    document.addEventListener('seb-security-bridge-ready', function () {
+        updateKeys();
+    });
+    window.addEventListener('popstate', function () {
+        updateKeys();
+    });
 
     try {
         delete window.__sebVersion;
