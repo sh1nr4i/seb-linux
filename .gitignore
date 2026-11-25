@@ -13,6 +13,7 @@
 /qrc_*
 /build/
 /build-tools/
+/target/
 /dist/
 /windows/
 /compile_commands.json
