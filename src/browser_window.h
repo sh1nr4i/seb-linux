@@ -4,6 +4,7 @@
 #include "browser/contracts/i_webview.h"
 
 #include <QElapsedTimer>
+#include <QPixmap>
 #include <QPoint>
 #include <QRect>
 #include <QWidget>
@@ -38,6 +39,7 @@ class IWebView;
 
 namespace seb::ui {
 class ActionCenterSidebar;
+class WindowSwitcherOverlay;
 }
 
 class SebSession;
@@ -63,6 +65,12 @@ public:
     QString taskbarTitle() const;
     QWidget *workspaceWidget() const;
     void bringMainContentToFront();
+    void setLockdownActive(bool active);
+    bool isLockdownActive() const { return lockdownActive_; }
+    QPixmap previewPixmap(const QSize &targetSize) const;
+    void stepWindowSwitcher(bool backwards = false);
+    void commitWindowSwitcher();
+    void cancelWindowSwitcher();
     void toggleActionCenter();
     void showSnapPreview(const QRect &targetRect, QWidget *draggedWindow);
     void hideSnapPreview();
@@ -128,10 +136,14 @@ private:
     QToolButton *findMenuButton_ = nullptr;
     QFrame *findPopup_ = nullptr;
     QLineEdit *findLineEdit_ = nullptr;
+    QPushButton *minimizeButton_ = nullptr;
     QPushButton *maximizeButton_ = nullptr;
     SebTaskbar *taskbar_ = nullptr;
     seb::ui::ActionCenterSidebar *sidebar_ = nullptr;
+    seb::ui::WindowSwitcherOverlay *windowSwitcher_ = nullptr;
+    mutable QPixmap lastPreviewPixmap_;
     bool isMainWindow_ = false;
+    bool lockdownActive_ = false;
     bool windowMaximized_ = true;
     bool windowSnapped_ = false;
     bool dragPending_ = false;

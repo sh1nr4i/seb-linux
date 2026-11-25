@@ -111,6 +111,7 @@ public:
     seb::proctoring::ScreenProctoringService *screenProctoring() const;
     void reportServerBattery(int percentage, bool online);
     void reportServerWireless(int signal);
+    void reportFocusLost();
 
 signals:
     void browserWindowsChanged();
@@ -163,4 +164,5 @@ private:
     std::unique_ptr<seb::proctoring::ScreenProctoringService> screenProctoring_;
     QString lastProctoringUrl_;
     QString lastProctoringTitle_;
+    qint64 lastFocusLostLogMs_ = 0;
 };

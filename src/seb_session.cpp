@@ -488,6 +488,21 @@ void SebSession::reportServerWireless(int signal)
     if (serverProxy_ && isServerSession() && !serverFinalized_) serverProxy_->reportWireless(signal);
 }
 
+void SebSession::reportFocusLost()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - lastFocusLostLogMs_ < 2000) {
+        return;
+    }
+    lastFocusLostLogMs_ = now;
+    qWarning() << "[AntiCheat] Main Safe Exam Browser window lost focus during locked session.";
+    if (serverProxy_ && isServerSession() && !serverFinalized_) {
+        serverProxy_->logEvent(
+            QStringLiteral("Main browser window lost focus during locked exam session"),
+            QStringLiteral("WARNING"));
+    }
+}
+
 void SebSession::sendServerIdentifier(const QString &identifier)
 {
     if (!serverProxy_ || !isServerSession() || serverFinalized_ || identifier.isEmpty()) return;

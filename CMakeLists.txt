@@ -187,10 +187,12 @@ set(SEB_SOURCES
     src/ui/taskbar/controls/window_list_popup.cpp
     src/ui/taskbar/taskbar_widget.cpp
     src/ui/action_center_sidebar.cpp
+    src/ui/window_switcher_overlay.cpp
     src/ui/runtime_window.cpp
     src/ui/seb_taskbar.cpp
     src/proctoring/screen_proctoring_service.cpp
     src/seb_session.cpp
+    src/security/lockdown_client.cpp
     src/security/security_service.cpp
     src/security/session_integrity_store.cpp
     src/server/parser.cpp
@@ -406,10 +408,12 @@ set(SEB_HEADERS
     src/ui/taskbar/controls/window_list_popup.h
     src/ui/taskbar/taskbar_widget.h
     src/ui/action_center_sidebar.h
+    src/ui/window_switcher_overlay.h
     src/ui/runtime_window.h
     src/ui/seb_taskbar.h
     src/proctoring/screen_proctoring_service.h
     src/seb_session.h
+    src/security/lockdown_client.h
     src/security/security_service.h
     src/security/session_integrity_store.h
     src/server/contracts/server_response.h
@@ -473,9 +477,21 @@ target_link_directories(safe-exam-browser PRIVATE ${LIBSECRET_LIBRARY_DIRS})
 target_compile_options(safe-exam-browser PRIVATE ${LIBSECRET_CFLAGS_OTHER})
 target_link_libraries(safe-exam-browser PRIVATE ${LIBSECRET_LIBRARIES})
 
+qt_add_executable(safe-exam-browser-lockdown
+    src/lockdown/lockdown_helper_main.cpp
+    src/lockdown/keyboard_blocker.cpp
+    src/lockdown/keyboard_blocker.h
+    src/lockdown/lockdown_protocol.h
+)
+
+target_include_directories(safe-exam-browser-lockdown PRIVATE src)
+target_compile_options(safe-exam-browser-lockdown PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(safe-exam-browser-lockdown PRIVATE Qt6::Core)
+
 include(GNUInstallDirs)
 
-install(TARGETS safe-exam-browser RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS safe-exam-browser safe-exam-browser-lockdown RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES packaging/linux/org.safeexambrowser.lockdown.policy DESTINATION ${CMAKE_INSTALL_DATADIR}/polkit-1/actions)
 install(FILES packaging/linux/safe-exam-browser.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES packaging/linux/safe-exam-browser.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/mime/packages)
 install(FILES packaging/linux/safe-exam-browser.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)

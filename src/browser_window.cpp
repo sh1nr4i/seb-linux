@@ -3,6 +3,7 @@
 #include "seb_session.h"
 #include "ui/action_center_sidebar.h"
 #include "ui/seb_taskbar.h"
+#include "ui/window_switcher_overlay.h"
 #include "ui/taskbar/common/taskbar_style.h"
 
 #include "browser/configuration_resource_detector.h"
@@ -14,6 +15,7 @@
 #include <QApplication>
 #include <QAuthenticator>
 #include <QCloseEvent>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QEvent>
@@ -38,6 +40,7 @@
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSize>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
@@ -250,6 +253,8 @@ BrowserWindow::BrowserWindow(
             taskbar_ = new SebTaskbar(session_, this);
             outerLayout->addWidget(taskbar_);
         }
+
+        windowSwitcher_ = new seb::ui::WindowSwitcherOverlay(session_, workspace_);
 
         workspace_->installEventFilter(this);
         windowFrame_->installEventFilter(this);
@@ -727,14 +732,14 @@ QFrame *BrowserWindow::createTitleBar(QWidget *parent)
 
     const QString btnStyle = taskbarButtonStyleSheet();
 
-    auto *minimizeBtn = new QPushButton(QStringLiteral("−"), bar);
-    minimizeBtn->setFixedSize(34, kTitleBarHeight);
-    minimizeBtn->setToolTip(QStringLiteral("Minimize"));
-    minimizeBtn->setCursor(Qt::PointingHandCursor);
-    minimizeBtn->setFocusPolicy(Qt::NoFocus);
-    minimizeBtn->setStyleSheet(btnStyle);
-    connect(minimizeBtn, &QPushButton::clicked, this, &BrowserWindow::minimizeManagedWindow);
-    layout->addWidget(minimizeBtn);
+    minimizeButton_ = new QPushButton(QStringLiteral("−"), bar);
+    minimizeButton_->setFixedSize(34, kTitleBarHeight);
+    minimizeButton_->setToolTip(QStringLiteral("Minimize"));
+    minimizeButton_->setCursor(Qt::PointingHandCursor);
+    minimizeButton_->setFocusPolicy(Qt::NoFocus);
+    minimizeButton_->setStyleSheet(btnStyle);
+    connect(minimizeButton_, &QPushButton::clicked, this, &BrowserWindow::minimizeManagedWindow);
+    layout->addWidget(minimizeButton_);
 
     maximizeButton_ = new QPushButton(bar);
     maximizeButton_->setFixedSize(34, kTitleBarHeight);
@@ -784,6 +789,78 @@ void BrowserWindow::bringMainContentToFront()
     if (windowFrame_) {
         windowFrame_->show();
         windowFrame_->raise();
+    }
+}
+
+void BrowserWindow::setLockdownActive(bool active)
+{
+    if (!isMainWindow_) {
+        return;
+    }
+    lockdownActive_ = active;
+
+    if (active) {
+        if (session_.settings().Security.ClipboardPolicy != seb::settings::security::ClipboardPolicy::Allow) {
+            if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+                clipboard->clear(QClipboard::Clipboard);
+                if (clipboard->supportsSelection()) {
+                    clipboard->clear(QClipboard::Selection);
+                }
+            }
+        }
+    }
+
+    const bool wasVisible = isVisible();
+    applyWindowFlags();
+    if (wasVisible) {
+        showFullScreen();
+        raise();
+        activateWindow();
+    }
+}
+
+QPixmap BrowserWindow::previewPixmap(const QSize &targetSize) const
+{
+    if (targetSize.isEmpty()) {
+        return {};
+    }
+    QWidget *frame = managedWindowFrame();
+    if (frame && frame->isVisible() && !frame->size().isEmpty()) {
+        const QPixmap grabbed = frame->grab();
+        if (!grabbed.isNull()) {
+            lastPreviewPixmap_ = grabbed;
+        }
+    }
+    if (lastPreviewPixmap_.isNull()) {
+        return {};
+    }
+    return lastPreviewPixmap_.scaled(targetSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+void BrowserWindow::stepWindowSwitcher(bool backwards)
+{
+    if (isMainWindow_ && windowSwitcher_) {
+        windowSwitcher_->step(backwards);
+    } else if (BrowserWindow *main = session_.mainWindow()) {
+        main->stepWindowSwitcher(backwards);
+    }
+}
+
+void BrowserWindow::commitWindowSwitcher()
+{
+    if (isMainWindow_ && windowSwitcher_) {
+        windowSwitcher_->commit();
+    } else if (BrowserWindow *main = session_.mainWindow()) {
+        main->commitWindowSwitcher();
+    }
+}
+
+void BrowserWindow::cancelWindowSwitcher()
+{
+    if (isMainWindow_ && windowSwitcher_) {
+        windowSwitcher_->cancel();
+    } else if (BrowserWindow *main = session_.mainWindow()) {
+        main->cancelWindowSwitcher();
     }
 }
 
@@ -840,6 +917,27 @@ QString BrowserWindow::taskbarTitle() const
 void BrowserWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
+    if (isMainWindow_ && lockdownActive_ && event && event->type() == QEvent::ActivationChange) {
+        const bool popupOpen =
+            (sidebar_ && sidebar_->isVisible()) ||
+            (zoomPopup_ && zoomPopup_->isVisible()) ||
+            (findPopup_ && findPopup_->isVisible()) ||
+            (qApp && qApp->activeModalWidget() != nullptr);
+        if (!isActiveWindow() && !popupOpen) {
+            session_.reportFocusLost();
+            QTimer::singleShot(80, this, [this] {
+                if (!lockdownActive_ || !isVisible()) {
+                    return;
+                }
+                if (qApp && qApp->activeModalWidget() != nullptr) {
+                    return;
+                }
+                showFullScreen();
+                raise();
+                activateWindow();
+            });
+        }
+    }
     notifyTaskbarStateChanged();
 }
 
@@ -965,6 +1063,9 @@ void BrowserWindow::resizeEvent(QResizeEvent *event)
     if (sidebar_ && sidebar_->isVisible()) {
         sidebar_->setFixedSize(sidebar_->width(), height());
         sidebar_->move(mapToGlobal(QPoint(0, 0)));
+    }
+    if (windowSwitcher_ && windowSwitcher_->isVisible()) {
+        windowSwitcher_->repositionInParent();
     }
     layoutResizeHandles();
 }
@@ -1210,7 +1311,11 @@ bool BrowserWindow::eventFilter(QObject *watched, QEvent *event)
 void BrowserWindow::applyWindowFlags()
 {
     if (isMainWindow_ || !parentWidget()) {
-        setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::CustomizeWindowHint);
+        Qt::WindowFlags flags = Qt::Window | Qt::FramelessWindowHint | Qt::CustomizeWindowHint;
+        if (isMainWindow_ && lockdownActive_) {
+            flags |= Qt::WindowStaysOnTopHint;
+        }
+        setWindowFlags(flags);
     }
 }
 
