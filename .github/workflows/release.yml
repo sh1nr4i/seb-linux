@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version without the v prefix"
+        description: "Release tag (e.g. 0.6.1-beta)"
         required: true
         type: string
 
@@ -15,56 +15,54 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
+  build-linux-packages:
     runs-on: ubuntu-24.04
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 500M
-      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - name: Cache ccache
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-release-${{ hashFiles('src/**', 'CMakeLists.txt') }}
-          restore-keys: |
-            ccache-release-
-
-      - name: Resolve release version
+      - name: Resolve release metadata
         id: release_meta
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.version }}"
+            raw="${{ github.event.inputs.version }}"
           else
-            version="${GITHUB_REF_NAME#v}"
+            raw="${GITHUB_REF_NAME#v}"
           fi
-          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${version#v}" >> "$GITHUB_OUTPUT"
+          ver="${raw#v}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+          if [[ "$ver" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Build release artifacts
+      - name: Build multi-distro release packages (.deb, .rpm, .tar.gz)
         run: |
           chmod +x scripts/build-release.sh
-          scripts/build-release.sh "${{ steps.release_meta.outputs.version }}"
+          ./scripts/build-release.sh --all
+          (cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS.txt)
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: safe-exam-browser-linux
+          name: safe-exam-browser-linux-dist
           path: |
-            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: Safe Exam Browser Linux ${{ steps.release_meta.outputs.version }}
+          name: Safe Exam Browser for Linux ${{ steps.release_meta.outputs.tag }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease == 'true' }}
           generate_release_notes: true
-          body: |
-            Thanks to everyone who contributed to this release.
-
-            GitHub generated release notes below include the commit summary and new contributors automatically.
           files: |
-            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt

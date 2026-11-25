@@ -4,143 +4,61 @@ on:
   push:
     branches:
       - main
-      - master
   pull_request:
 
 jobs:
-  build-qtwebengine:
+  test-and-build:
     runs-on: ubuntu-24.04
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 500M
-      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - name: Cache ccache
-        uses: actions/cache@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & target
+        uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-qtwebengine-${{ hashFiles('src/**', 'CMakeLists.txt') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ccache-qtwebengine-
+            cargo-${{ runner.os }}-
 
-      - name: Install Qt WebEngine build dependencies
+      - name: Install GTK3 & WebKitGTK 4.1 dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            ccache \
-            cmake \
-            ninja-build \
-            libqt6svg6-dev \
-            qt6-base-dev \
-            qt6-tools-dev-tools \
-            qt6-webchannel-dev \
-            qt6-webengine-dev \
-            zlib1g-dev \
-            libsecret-1-dev
-
-      - name: Build Qt WebEngine backend
-        run: ./scripts/build.sh -DSEB_FORCE_QTWEBENGINE=ON
-
-      - name: Upload Qt WebEngine binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: safe-exam-browser-qtwebengine
-          path: build/bin/safe-exam-browser
-          if-no-files-found: error
-
-  build-webkitgtk-fallback:
-    runs-on: ubuntu-24.04
-    env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 500M
-      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Cache ccache
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-webkitgtk-${{ hashFiles('src/**', 'CMakeLists.txt') }}
-          restore-keys: |
-            ccache-webkitgtk-
-
-      - name: Install WebKitGTK fallback build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ccache \
-            cmake \
-            ninja-build \
-            libqt6svg6-dev \
-            qt6-base-dev \
-            qt6-tools-dev-tools \
-            libwebkit2gtk-4.1-dev \
+            pkg-config \
             libgtk-3-dev \
-            zlib1g-dev \
-            libsecret-1-dev
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libgdk-pixbuf-2.0-dev
 
-      - name: Build WebKitGTK fallback backend
-        run: ./scripts/build.sh -DSEB_FORCE_WEBKITGTK=ON
+      - name: Run workspace unit tests
+        run: cargo test --workspace
 
-      - name: Upload WebKitGTK binary
-        uses: actions/upload-artifact@v7
+      - name: Build Dev Build & verify CLI flags
+        run: |
+          ./scripts/build.sh --dev
+          ./build/bin/safe-exam-browser --version
+          ./build/bin/safe-exam-browser --help | grep -q -- '--dev-bypass'
+
+      - name: Build User Build & verify CLI security gate
+        run: |
+          ./scripts/build.sh --user
+          ./build/bin/safe-exam-browser --version
+          ! ./build/bin/safe-exam-browser --help | grep -q -- '--dev-bypass'
+          test -x build/bin/safe-exam-browser-lockdown
+          test -f build/bin/libseb_web_extension.so
+
+      - name: Upload User Build binaries
+        uses: actions/upload-artifact@v4
         with:
-          name: safe-exam-browser-webkitgtk
-          path: build/bin/safe-exam-browser
+          name: safe-exam-browser-linux-user-build
+          path: build/bin/
           if-no-files-found: error
-
-  runtime-smoke:
-    needs:
-      - build-qtwebengine
-      - build-webkitgtk-fallback
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libqt6webenginewidgets6 \
-            libqt6webenginecore6-bin \
-            libqt6webengine6-data \
-            libqt6webchannel6 \
-            libqt6xml6t64 \
-            qt6-qpa-plugins \
-            libwebkit2gtk-4.1-0 \
-            libgtk-3-0t64 \
-            zlib1g \
-            libsecret-1-0
-
-      - name: Download Qt WebEngine binary
-        uses: actions/download-artifact@v8
-        with:
-          name: safe-exam-browser-qtwebengine
-          path: artifacts/qtwebengine
-
-      - name: Download WebKitGTK binary
-        uses: actions/download-artifact@v8
-        with:
-          name: safe-exam-browser-webkitgtk
-          path: artifacts/webkitgtk
-
-      - name: Verify Qt WebEngine runtime
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          chmod +x artifacts/qtwebengine/safe-exam-browser
-          ldd artifacts/qtwebengine/safe-exam-browser | grep -q 'libQt6WebEngine'
-          ! ldd artifacts/qtwebengine/safe-exam-browser | grep -q 'libwebkit2gtk-4.1'
-          artifacts/qtwebengine/safe-exam-browser --version
-
-      - name: Verify WebKitGTK runtime
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          chmod +x artifacts/webkitgtk/safe-exam-browser
-          ldd artifacts/webkitgtk/safe-exam-browser | grep -q 'libwebkit2gtk-4.1'
-          ! ldd artifacts/webkitgtk/safe-exam-browser | grep -q 'libQt6WebEngine'
-          artifacts/webkitgtk/safe-exam-browser --version
