@@ -1,0 +1,12 @@
+[package]
+name = "seb-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pulseaudio = "0.3"
+regex.workspace = true
+serde.workspace = true
+x11rb = { version = "0.14", features = ["xkb"] }
+zbus = { version = "5", features = ["blocking-api"] }
