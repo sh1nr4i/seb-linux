@@ -1,0 +1,30 @@
+[package]
+name = "seb-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes.workspace = true
+base64.workspace = true
+cbc.workspace = true
+flate2.workspace = true
+hex.workspace = true
+hmac.workspace = true
+p12-keystore = "0.4"
+pbkdf2.workspace = true
+pkcs8 = { version = "0.10", features = ["pem"] }
+rand.workspace = true
+roxmltree = "0.20"
+rsa = "0.9"
+seb-filter = { path = "../seb-filter" }
+seb-security = { path = "../seb-security" }
+secret-service = { version = "5.2", features = ["rt-async-io-crypto-rust"] }
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+url.workspace = true
+x509-cert = "0.2"
