@@ -1,0 +1,35 @@
+[package]
+name = "seb-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "safe-exam-browser"
+path = "src/main.rs"
+
+[features]
+default = []
+dev = []
+
+[dependencies]
+base64.workspace = true
+cairo-rs = "0.18"
+chrono = "0.4"
+gdk = "0.18"
+gdk-pixbuf = "0.18"
+gio = "0.18"
+glib = "0.18"
+gtk = "0.18"
+libc.workspace = true
+seb-config = { path = "../seb-config" }
+seb-filter = { path = "../seb-filter" }
+seb-platform = { path = "../seb-platform" }
+seb-proctoring = { path = "../seb-proctoring" }
+seb-security = { path = "../seb-security" }
+seb-server = { path = "../seb-server" }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+webkit2gtk = { version = "2.0", features = ["v2_38"] }
+x11rb = "0.14"
