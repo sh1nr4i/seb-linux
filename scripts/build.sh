@@ -2,32 +2,43 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build"
-BUILD_CONFIG_STAMP="${BUILD_DIR}/.last-cmake-args"
-CMAKE_ARGS=("$@")
+BUILD_BIN_DIR="${ROOT_DIR}/build/bin"
+DEV_BUILD=0
 
-GENERATOR_ARGS=()
-if command -v ninja >/dev/null 2>&1; then
-  GENERATOR_ARGS=(-G Ninja)
+for arg in "$@"; do
+  case "${arg}" in
+    --dev|-DSEB_DEV=ON)
+      DEV_BUILD=1
+      ;;
+    --user|-DSEB_DEV=OFF)
+      DEV_BUILD=0
+      ;;
+    *)
+      echo "Unknown build argument: ${arg}" >&2
+      echo "Usage: $0 [--dev | -DSEB_DEV=ON | --user | -DSEB_DEV=OFF]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+cd "${ROOT_DIR}"
+
+CARGO_ARGS=(build --release -p seb-app -p seb-lockdown-helper -p seb-web-extension)
+if [[ "${DEV_BUILD}" -eq 1 ]]; then
+  echo "Building 100% Pure Rust Safe Exam Browser (Dev Build: --features seb-app/dev)..."
+  CARGO_ARGS+=(--features seb-app/dev)
+else
+  echo "Building 100% Pure Rust Safe Exam Browser (User Build: strict anti-cheat default)..."
 fi
 
-CMAKE_ARGS_FINGERPRINT="$(printf '%s\0' ${CMAKE_ARGS[@]+"${CMAKE_ARGS[@]}"} | sha256sum | awk '{print $1}')"
+cargo "${CARGO_ARGS[@]}"
 
-PREVIOUS_FINGERPRINT=""
-if [[ -f "${BUILD_CONFIG_STAMP}" ]]; then
-  PREVIOUS_FINGERPRINT="$(<"${BUILD_CONFIG_STAMP}")"
-fi
+mkdir -p "${BUILD_BIN_DIR}"
+cp -f "${ROOT_DIR}/target/release/safe-exam-browser" "${BUILD_BIN_DIR}/safe-exam-browser"
+cp -f "${ROOT_DIR}/target/release/safe-exam-browser-lockdown" "${BUILD_BIN_DIR}/safe-exam-browser-lockdown"
+cp -f "${ROOT_DIR}/target/release/libseb_web_extension.so" "${BUILD_BIN_DIR}/libseb_web_extension.so"
 
-if [[ -f "${BUILD_DIR}/CMakeCache.txt" && "${PREVIOUS_FINGERPRINT}" != "${CMAKE_ARGS_FINGERPRINT}" ]]; then
-  echo "Detected changed CMake configuration; cleaning ${BUILD_DIR}"
-  rm -rf "${BUILD_DIR}"
-fi
-
-mkdir -p "${BUILD_DIR}"
-
-echo "Configuring build with: cmake -S ${ROOT_DIR} -B ${BUILD_DIR} ${CMAKE_ARGS[*]:-}"
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" ${GENERATOR_ARGS[@]+"${GENERATOR_ARGS[@]}"} -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS[@]+"${CMAKE_ARGS[@]}"}
-printf '%s\n' "${CMAKE_ARGS_FINGERPRINT}" > "${BUILD_CONFIG_STAMP}"
-cmake --build "${BUILD_DIR}" -j"$(nproc)"
-
-echo "Build output: ${BUILD_DIR}/bin/safe-exam-browser"
+echo "Build outputs:"
+echo "  ${BUILD_BIN_DIR}/safe-exam-browser"
+echo "  ${BUILD_BIN_DIR}/safe-exam-browser-lockdown"
+echo "  ${BUILD_BIN_DIR}/libseb_web_extension.so"

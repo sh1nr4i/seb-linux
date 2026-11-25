@@ -9,10 +9,10 @@
     <name>SEB Linux contributors</name>
   </developer>
   <launchable type="desktop-id">safe-exam-browser.desktop</launchable>
-  <url type="homepage">https://github.com/Jvr2022/seb-linux</url>
-  <url type="bugtracker">https://github.com/Jvr2022/seb-linux/issues</url>
+  <url type="homepage">https://github.com/sh1nr4i/seb-linux-rust</url>
+  <url type="bugtracker">https://github.com/sh1nr4i/seb-linux-rust/issues</url>
   <description>
-    <p>Safe Exam Browser for Linux opens .seb exam configuration files, handles seb:// and sebs:// links, and runs secured exam sessions with either Qt WebEngine or the WebKitGTK fallback backend.</p>
+    <p>Safe Exam Browser for Linux (Pure Rust edition) opens .seb exam configuration files, handles seb:// and sebs:// links, and runs secured exam sessions with GTK3, WebKitGTK 4.1, and kernel-level anti-cheat lockdown.</p>
   </description>
   <categories>
     <category>Education</category>

@@ -1,0 +1,41 @@
+pkgname=safe-exam-browser
+pkgver=0.6.1
+pkgrel=1
+pkgdesc="Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK edition)"
+arch=('x86_64')
+url="https://github.com/sh1nr4i/seb-linux-rust"
+license=('MPL-2.0')
+depends=('webkit2gtk-4.1' 'gtk3' 'polkit' 'desktop-file-utils' 'shared-mime-info')
+makedepends=('cargo' 'pkgconf')
+provides=('safe-exam-browser')
+conflicts=('safe-exam-browser')
+source=()
+
+build() {
+  cd "${startdir}/../.."
+  cargo build --release --frozen -p seb-app -p seb-lockdown-helper -p seb-web-extension \
+    || cargo build --release -p seb-app -p seb-lockdown-helper -p seb-web-extension
+}
+
+package() {
+  local root="${startdir}/../.."
+  install -Dm755 "${root}/target/release/safe-exam-browser" "${pkgdir}/usr/bin/safe-exam-browser"
+  install -Dm755 "${root}/target/release/safe-exam-browser-lockdown" "${pkgdir}/usr/bin/safe-exam-browser-lockdown"
+  install -Dm755 "${root}/target/release/libseb_web_extension.so" "${pkgdir}/usr/bin/libseb_web_extension.so"
+  install -Dm755 "${root}/target/release/libseb_web_extension.so" "${pkgdir}/usr/lib/safe-exam-browser/libseb_web_extension.so"
+
+  install -Dm644 "${root}/packaging/linux/org.safeexambrowser.lockdown.policy" \
+    "${pkgdir}/usr/share/polkit-1/actions/org.safeexambrowser.lockdown.policy"
+  install -Dm644 "${root}/packaging/linux/safe-exam-browser.desktop" \
+    "${pkgdir}/usr/share/applications/safe-exam-browser.desktop"
+  install -Dm644 "${root}/packaging/linux/safe-exam-browser.xml" \
+    "${pkgdir}/usr/share/mime/packages/safe-exam-browser.xml"
+  install -Dm644 "${root}/packaging/linux/safe-exam-browser.metainfo.xml" \
+    "${pkgdir}/usr/share/metainfo/safe-exam-browser.metainfo.xml"
+  install -Dm644 "${root}/assets/icons/safe-exam-browser-64.png" \
+    "${pkgdir}/usr/share/icons/hicolor/64x64/apps/safe-exam-browser.png"
+  install -Dm644 "${root}/assets/icons/safe-exam-browser.png" \
+    "${pkgdir}/usr/share/icons/hicolor/256x256/apps/safe-exam-browser.png"
+  install -Dm644 "${root}/assets/icons/safe-exam-browser.png" \
+    "${pkgdir}/usr/share/pixmaps/safe-exam-browser.png"
+}

@@ -1,0 +1,24 @@
+FROM fedora:40
+
+ENV CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN dnf install -y \
+    gcc \
+    gcc-c++ \
+    pkgconf-pkg-config \
+    curl \
+    ca-certificates \
+    webkit2gtk4.1-devel \
+    gtk3-devel \
+    glib2-devel \
+    cairo-devel \
+    gdk-pixbuf2-devel \
+    rpm-build \
+    desktop-file-utils \
+ && dnf clean all
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /src

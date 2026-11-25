@@ -2,168 +2,243 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_DIR="${ROOT_DIR}"
-VERSION="${1:-0.1.0}"
-BUILD_DIR="${PROJECT_DIR}/build"
-ARTIFACT_DIR="${PROJECT_DIR}/dist"
-TOOLS_DIR="${PROJECT_DIR}/build-tools"
-PACKAGE_NAME="safe-exam-browser"
-LINUXDEPLOY_VERSION="1-alpha-20250213-2"
-LINUXDEPLOY_PLUGIN_QT_VERSION="1-alpha-20250213-1"
-LINUXDEPLOY_SHA256="4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a"
-LINUXDEPLOY_PLUGIN_QT_SHA256="15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724"
-LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage"
-LINUXDEPLOY_PLUGIN_QT_URL="https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/${LINUXDEPLOY_PLUGIN_QT_VERSION}/linuxdeploy-plugin-qt-x86_64.AppImage"
-LINUXBUILD_EXTRA_ARGS=(
-    -l /usr/lib/x86_64-linux-gnu/libssl.so.3
-    -l /usr/lib/x86_64-linux-gnu/libsoftokn3.so
-    -l /usr/lib/x86_64-linux-gnu/libatomic.so.1
-    -l /usr/lib/x86_64-linux-gnu/libdeflate.so.0
-    -l /usr/lib/x86_64-linux-gnu/libjbig.so.0
-    -l /usr/lib/x86_64-linux-gnu/libjpeg.so.62
-    -l /usr/lib/x86_64-linux-gnu/libLerc.so.4
-    -l /usr/lib/x86_64-linux-gnu/libQt6Pdf.so.6
-    -l /usr/lib/x86_64-linux-gnu/libQt6QmlWorkerScript.so.6
-    -l /usr/lib/x86_64-linux-gnu/libsmime3.so
-    -l /usr/lib/x86_64-linux-gnu/libssh2.so.1
-    -l /usr/lib/x86_64-linux-gnu/libtiff.so.6
-    -l /usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0
-    -l /usr/lib/x86_64-linux-gnu/libxcb-xinput.so.0
-)
-# -l /usr/lib/x86_64-linux-gnu/libnghttp3.so.9
-# -l /usr/lib/x86_64-linux-gnu/libngtcp2.so.16 -l /usr/lib/x86_64-linux-gnu/libngtcp2_crypto_gnutls.so.8
-# -l /usr/lib/x86_64-linux-gnu/libQt6QmlMeta.so.6
-# -l /usr/lib/x86_64-linux-gnu/libxml2.so.16
-echo "Variables set"
+VERSION="${SEB_VERSION:-0.6.1}"
+DIST_DIR="${ROOT_DIR}/dist"
+BUILD_ALL=1
+BUILD_DEB=0
+BUILD_RPM=0
+BUILD_TARBALL=0
+BUILD_LOCAL=0
 
-GENERATOR_ARGS=()
-if command -v ninja >/dev/null 2>&1; then
-    GENERATOR_ARGS=(-G Ninja)
+for arg in "$@"; do
+  case "${arg}" in
+    --all)
+      BUILD_ALL=1
+      ;;
+    --deb)
+      BUILD_ALL=0
+      BUILD_DEB=1
+      ;;
+    --rpm)
+      BUILD_ALL=0
+      BUILD_RPM=1
+      ;;
+    --tarball)
+      BUILD_ALL=0
+      BUILD_TARBALL=1
+      ;;
+    --local)
+      BUILD_ALL=0
+      BUILD_LOCAL=1
+      ;;
+    *)
+      echo "Usage: $0 [--all | --deb | --rpm | --tarball | --local]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "${BUILD_ALL}" -eq 1 ]]; then
+  BUILD_DEB=1
+  BUILD_RPM=1
+  BUILD_TARBALL=1
 fi
 
-verify_sha256() {
-    local file_path="$1"
-    local expected_sha256="$2"
-    local actual_sha256
+mkdir -p "${DIST_DIR}"
 
-    actual_sha256="$(sha256sum "${file_path}" | awk '{print $1}')"
-    [[ "${actual_sha256}" == "${expected_sha256}" ]]
+stage_bundle_tree() {
+  local bin_dir="$1"
+  local stage="$2"
+  rm -rf "${stage}"
+  mkdir -p \
+    "${stage}/bin" \
+    "${stage}/share/polkit-1/actions" \
+    "${stage}/share/applications" \
+    "${stage}/share/mime/packages" \
+    "${stage}/share/metainfo" \
+    "${stage}/share/icons/hicolor/64x64/apps" \
+    "${stage}/share/icons/hicolor/256x256/apps"
+
+  cp -f "${bin_dir}/safe-exam-browser" "${stage}/bin/safe-exam-browser"
+  cp -f "${bin_dir}/safe-exam-browser-lockdown" "${stage}/bin/safe-exam-browser-lockdown"
+  cp -f "${bin_dir}/libseb_web_extension.so" "${stage}/bin/libseb_web_extension.so"
+  chmod 0755 "${stage}/bin/safe-exam-browser" "${stage}/bin/safe-exam-browser-lockdown" "${stage}/bin/libseb_web_extension.so"
+
+  cp -f "${ROOT_DIR}/packaging/linux/org.safeexambrowser.lockdown.policy" "${stage}/share/polkit-1/actions/"
+  cp -f "${ROOT_DIR}/packaging/linux/safe-exam-browser.desktop" "${stage}/share/applications/"
+  cp -f "${ROOT_DIR}/packaging/linux/safe-exam-browser.xml" "${stage}/share/mime/packages/"
+  cp -f "${ROOT_DIR}/packaging/linux/safe-exam-browser.metainfo.xml" "${stage}/share/metainfo/"
+  cp -f "${ROOT_DIR}/assets/icons/safe-exam-browser-64.png" "${stage}/share/icons/hicolor/64x64/apps/safe-exam-browser.png"
+  cp -f "${ROOT_DIR}/assets/icons/safe-exam-browser.png" "${stage}/share/icons/hicolor/256x256/apps/safe-exam-browser.png"
+  cp -f "${ROOT_DIR}/packaging/linux/install.sh" "${stage}/install.sh"
+  cp -f "${ROOT_DIR}/packaging/linux/uninstall.sh" "${stage}/uninstall.sh"
+  chmod 0755 "${stage}/install.sh" "${stage}/uninstall.sh"
 }
 
-download_verified_tool() {
-    local url="$1"
-    local output_path="$2"
-    local expected_sha256="$3"
-    local tmp_path
+if [[ "${BUILD_LOCAL}" -eq 1 ]]; then
+  "${ROOT_DIR}/scripts/build.sh" --user
+  stage_dir="${ROOT_DIR}/build/stage-local/safe-exam-browser-${VERSION}-linux-x86_64"
+  stage_bundle_tree "${ROOT_DIR}/build/bin" "${stage_dir}"
+  tar -C "$(dirname "${stage_dir}")" -czf "${DIST_DIR}/safe-exam-browser-${VERSION}-local-x86_64.tar.gz" "$(basename "${stage_dir}")"
+  echo "Created local tarball: ${DIST_DIR}/safe-exam-browser-${VERSION}-local-x86_64.tar.gz"
+fi
 
-    if [[ -f "${output_path}" ]] && verify_sha256 "${output_path}" "${expected_sha256}"; then
-        chmod +x "${output_path}"
-        return
-    fi
+if [[ "${BUILD_DEB}" -eq 1 || "${BUILD_TARBALL}" -eq 1 ]]; then
+  echo "Building Ubuntu 22.04 LTS Docker image for GLIBC-portable .deb & universal tarball..."
+  docker build -t seb-rust-ubuntu22 -f "${ROOT_DIR}/packaging/docker/Dockerfile.ubuntu22" "${ROOT_DIR}"
 
-    tmp_path="$(mktemp "${output_path}.XXXXXX")"
-    if ! wget -q "${url}" -O "${tmp_path}"; then
-        rm -f "${tmp_path}"
-        echo "Failed to download ${url}" >&2
-        exit 1
-    fi
+  cargo_cache="${HOME}/.cargo/registry"
+  mkdir -p "${cargo_cache}"
+  docker run --rm \
+    -v "${ROOT_DIR}:/src" \
+    -v "${cargo_cache}:/root/.cargo/registry" \
+    -v "seb-target-ubuntu22:/target-ubuntu22" \
+    -e "SEB_VERSION=${VERSION}" \
+    -e "BUILD_DEB=${BUILD_DEB}" \
+    -e "BUILD_TARBALL=${BUILD_TARBALL}" \
+    -e "HOST_UID=$(id -u)" \
+    -e "HOST_GID=$(id -g)" \
+    seb-rust-ubuntu22 \
+    bash -ceu '
+      cd /src
+      cargo build --release --target-dir /target-ubuntu22 -p seb-app -p seb-lockdown-helper -p seb-web-extension
+      OUT=/target-ubuntu22/release
 
-    if ! verify_sha256 "${tmp_path}" "${expected_sha256}"; then
-        rm -f "${tmp_path}"
-        echo "Checksum verification failed for ${url}" >&2
-        exit 1
-    fi
+      if [ "${BUILD_TARBALL}" = "1" ]; then
+        STAGE="/tmp/seb-stage/safe-exam-browser-${SEB_VERSION}-linux-x86_64"
+        rm -rf /tmp/seb-stage
+        mkdir -p "${STAGE}/bin" "${STAGE}/share/polkit-1/actions" "${STAGE}/share/applications" \
+          "${STAGE}/share/mime/packages" "${STAGE}/share/metainfo" \
+          "${STAGE}/share/icons/hicolor/64x64/apps" "${STAGE}/share/icons/hicolor/256x256/apps"
+        cp -f "${OUT}/safe-exam-browser" "${OUT}/safe-exam-browser-lockdown" "${OUT}/libseb_web_extension.so" "${STAGE}/bin/"
+        chmod 0755 "${STAGE}/bin/"*
+        cp -f packaging/linux/org.safeexambrowser.lockdown.policy "${STAGE}/share/polkit-1/actions/"
+        cp -f packaging/linux/safe-exam-browser.desktop "${STAGE}/share/applications/"
+        cp -f packaging/linux/safe-exam-browser.xml "${STAGE}/share/mime/packages/"
+        cp -f packaging/linux/safe-exam-browser.metainfo.xml "${STAGE}/share/metainfo/"
+        cp -f assets/icons/safe-exam-browser-64.png "${STAGE}/share/icons/hicolor/64x64/apps/safe-exam-browser.png"
+        cp -f assets/icons/safe-exam-browser.png "${STAGE}/share/icons/hicolor/256x256/apps/safe-exam-browser.png"
+        cp -f packaging/linux/install.sh packaging/linux/uninstall.sh "${STAGE}/"
+        chmod 0755 "${STAGE}/install.sh" "${STAGE}/uninstall.sh"
+        tar -C /tmp/seb-stage -czf "/src/dist/safe-exam-browser-${SEB_VERSION}-linux-x86_64.tar.gz" "safe-exam-browser-${SEB_VERSION}-linux-x86_64"
+      fi
 
-    mv "${tmp_path}" "${output_path}"
-    chmod +x "${output_path}"
-}
+      if [ "${BUILD_DEB}" = "1" ]; then
+        DEB_ROOT="/tmp/seb-deb"
+        rm -rf "${DEB_ROOT}"
+        mkdir -p "${DEB_ROOT}/DEBIAN" "${DEB_ROOT}/usr/bin" "${DEB_ROOT}/usr/lib/safe-exam-browser" \
+          "${DEB_ROOT}/usr/share/polkit-1/actions" "${DEB_ROOT}/usr/share/applications" \
+          "${DEB_ROOT}/usr/share/mime/packages" "${DEB_ROOT}/usr/share/metainfo" \
+          "${DEB_ROOT}/usr/share/icons/hicolor/64x64/apps" "${DEB_ROOT}/usr/share/icons/hicolor/256x256/apps" \
+          "${DEB_ROOT}/usr/share/pixmaps"
+        install -Dm755 "${OUT}/safe-exam-browser" "${DEB_ROOT}/usr/bin/safe-exam-browser"
+        install -Dm755 "${OUT}/safe-exam-browser-lockdown" "${DEB_ROOT}/usr/bin/safe-exam-browser-lockdown"
+        install -Dm755 "${OUT}/libseb_web_extension.so" "${DEB_ROOT}/usr/bin/libseb_web_extension.so"
+        install -Dm755 "${OUT}/libseb_web_extension.so" "${DEB_ROOT}/usr/lib/safe-exam-browser/libseb_web_extension.so"
+        install -Dm644 packaging/linux/org.safeexambrowser.lockdown.policy "${DEB_ROOT}/usr/share/polkit-1/actions/org.safeexambrowser.lockdown.policy"
+        install -Dm644 packaging/linux/safe-exam-browser.desktop "${DEB_ROOT}/usr/share/applications/safe-exam-browser.desktop"
+        install -Dm644 packaging/linux/safe-exam-browser.xml "${DEB_ROOT}/usr/share/mime/packages/safe-exam-browser.xml"
+        install -Dm644 packaging/linux/safe-exam-browser.metainfo.xml "${DEB_ROOT}/usr/share/metainfo/safe-exam-browser.metainfo.xml"
+        install -Dm644 assets/icons/safe-exam-browser-64.png "${DEB_ROOT}/usr/share/icons/hicolor/64x64/apps/safe-exam-browser.png"
+        install -Dm644 assets/icons/safe-exam-browser.png "${DEB_ROOT}/usr/share/icons/hicolor/256x256/apps/safe-exam-browser.png"
+        install -Dm644 assets/icons/safe-exam-browser.png "${DEB_ROOT}/usr/share/pixmaps/safe-exam-browser.png"
 
-run_logged() {
-    local log_path="$1"
-    shift
+        cat > "${DEB_ROOT}/DEBIAN/control" <<EOF
+Package: safe-exam-browser
+Version: ${SEB_VERSION}
+Section: education
+Priority: optional
+Architecture: amd64
+Maintainer: SEB Linux Contributors <noreply@example.org>
+Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, shared-mime-info, desktop-file-utils
+Description: Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK)
+ Opens .seb exam configuration files, handles seb:// and sebs:// links,
+ and enforces kernel-level anti-cheat lockdown.
+EOF
+        cat > "${DEB_ROOT}/DEBIAN/postinst" <<\EOF
+#!/bin/sh
+set -e
+update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+EOF
+        chmod 0755 "${DEB_ROOT}/DEBIAN/postinst"
+        dpkg-deb --build --root-owner-group "${DEB_ROOT}" "/src/dist/safe-exam-browser_${SEB_VERSION}_amd64.deb"
+      fi
+      chown -R "${HOST_UID}:${HOST_GID}" /src/dist
+    '
+fi
 
-    if ! "$@" > "${log_path}" 2>&1; then
-        echo "Command failed: $*" >&2
-        echo "Last 100 lines from ${log_path}:" >&2
-        tail -n 100 "${log_path}" >&2 || true
-        return 1
-    fi
-}
+if [[ "${BUILD_RPM}" -eq 1 ]]; then
+  echo "Building Fedora 40 Docker image for .rpm package..."
+  docker build -t seb-rust-fedora -f "${ROOT_DIR}/packaging/docker/Dockerfile.fedora" "${ROOT_DIR}"
 
-build_appimage() {
-    local config="$1"
-    local build_dir="$2"
-    local output_path="$3"
-    local app_dir="${build_dir}/AppDir"
-    local appimage_output_dir="${build_dir}/appimage-output"
-    local appimage_path
+  cargo_cache="${HOME}/.cargo/registry"
+  mkdir -p "${cargo_cache}"
+  docker run --rm \
+    -v "${ROOT_DIR}:/src" \
+    -v "${cargo_cache}:/root/.cargo/registry" \
+    -v "seb-target-fedora:/target-fedora" \
+    -e "SEB_VERSION=${VERSION}" \
+    -e "HOST_UID=$(id -u)" \
+    -e "HOST_GID=$(id -g)" \
+    seb-rust-fedora \
+    bash -ceu '
+      cd /src
+      cargo build --release --target-dir /target-fedora -p seb-app -p seb-lockdown-helper -p seb-web-extension
+      OUT=/target-fedora/release
+      TOP=/tmp/rpmbuild
+      rm -rf "${TOP}"
+      mkdir -p "${TOP}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 
-    rm -rf "${app_dir}" "${appimage_output_dir}"
-    mkdir -p "${build_dir}" "${app_dir}" "${appimage_output_dir}"
+      cat > "${TOP}/SPECS/safe-exam-browser.spec" <<EOF
+Name:           safe-exam-browser
+Version:        ${SEB_VERSION}
+Release:        1%{?dist}
+Summary:        Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK)
+License:        MPL-2.0
+Requires:       webkit2gtk4.1, gtk3, polkit, desktop-file-utils, shared-mime-info
 
-    pushd "${build_dir}" >/dev/null
-    cmake -S "${PROJECT_DIR}" -B "${build_dir}" ${GENERATOR_ARGS[@]+"${GENERATOR_ARGS[@]}"} -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr "${config}"
-    run_logged "${build_dir}/make.log" cmake --build "${build_dir}" -j"$(nproc)"
-    run_logged "${build_dir}/make-install.log" env DESTDIR="${app_dir}" cmake --install "${build_dir}"
-    popd >/dev/null
+%description
+Opens .seb exam configuration files, handles seb:// and sebs:// links,
+and enforces kernel-level anti-cheat lockdown on Linux.
 
-    rm -f "${output_path}"
-    pushd "${appimage_output_dir}" >/dev/null
-    PATH="${TOOLS_DIR}:${PATH}" \
-    LINUXDEPLOY_OUTPUT_VERSION="${VERSION}" \
-    "${TOOLS_DIR}/linuxdeploy-x86_64.AppImage" \
-        --appdir "${app_dir}" \
-        -i "${PROJECT_DIR}/assets/icons/safe-exam-browser.png" \
-        -d "${PROJECT_DIR}/packaging/linux/safe-exam-browser.desktop" \
-        --output appimage \
-        --plugin qt \
-        --verbosity=3 \
-        "${LINUXBUILD_EXTRA_ARGS[@]}"
-    popd >/dev/null
+%install
+install -Dm755 ${OUT}/safe-exam-browser %{buildroot}/usr/bin/safe-exam-browser
+install -Dm755 ${OUT}/safe-exam-browser-lockdown %{buildroot}/usr/bin/safe-exam-browser-lockdown
+install -Dm755 ${OUT}/libseb_web_extension.so %{buildroot}/usr/bin/libseb_web_extension.so
+install -Dm755 ${OUT}/libseb_web_extension.so %{buildroot}/usr/lib/safe-exam-browser/libseb_web_extension.so
+install -Dm644 /src/packaging/linux/org.safeexambrowser.lockdown.policy %{buildroot}/usr/share/polkit-1/actions/org.safeexambrowser.lockdown.policy
+install -Dm644 /src/packaging/linux/safe-exam-browser.desktop %{buildroot}/usr/share/applications/safe-exam-browser.desktop
+install -Dm644 /src/packaging/linux/safe-exam-browser.xml %{buildroot}/usr/share/mime/packages/safe-exam-browser.xml
+install -Dm644 /src/packaging/linux/safe-exam-browser.metainfo.xml %{buildroot}/usr/share/metainfo/safe-exam-browser.metainfo.xml
+install -Dm644 /src/assets/icons/safe-exam-browser-64.png %{buildroot}/usr/share/icons/hicolor/64x64/apps/safe-exam-browser.png
+install -Dm644 /src/assets/icons/safe-exam-browser.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/safe-exam-browser.png
+install -Dm644 /src/assets/icons/safe-exam-browser.png %{buildroot}/usr/share/pixmaps/safe-exam-browser.png
 
-    appimage_path="$(find "${appimage_output_dir}" -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
-    if [[ -z "${appimage_path}" ]]; then
-        echo "linuxdeploy did not produce an AppImage" >&2
-        exit 1
-    fi
+%post
+update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 
-    mv "${appimage_path}" "${output_path}"
-}
+%files
+/usr/bin/safe-exam-browser
+/usr/bin/safe-exam-browser-lockdown
+/usr/bin/libseb_web_extension.so
+/usr/lib/safe-exam-browser/libseb_web_extension.so
+/usr/share/polkit-1/actions/org.safeexambrowser.lockdown.policy
+/usr/share/applications/safe-exam-browser.desktop
+/usr/share/mime/packages/safe-exam-browser.xml
+/usr/share/metainfo/safe-exam-browser.metainfo.xml
+/usr/share/icons/hicolor/64x64/apps/safe-exam-browser.png
+/usr/share/icons/hicolor/256x256/apps/safe-exam-browser.png
+/usr/share/pixmaps/safe-exam-browser.png
+EOF
+      rpmbuild --define "_topdir ${TOP}" -bb "${TOP}/SPECS/safe-exam-browser.spec"
+      cp -f "${TOP}"/RPMS/*/*.rpm /src/dist/
+      chown -R "${HOST_UID}:${HOST_GID}" /src/dist
+    '
+fi
 
-echo "Installing dependencies"
-${ROOT_DIR}/scripts/dependencies.sh
-
-unset QML_SOURCES_PATHS
-unset QMAKE
-unset EXTRA_QT_MODULES
-export QML_SOURCES_PATHS="$PROJECT_DIR"/src
-export QMAKE=$(which qmake6)
-export EXTRA_QT_MODULES="libssl;libcrypto"
-echo "Environment variables set"
-
-mkdir -p "${BUILD_DIR}" "${ARTIFACT_DIR}" "${TOOLS_DIR}"
-rm -rf "${BUILD_DIR:?}/"*
-echo "Made directories"
-
-download_verified_tool \
-    "${LINUXDEPLOY_URL}" \
-    "${TOOLS_DIR}/linuxdeploy-x86_64.AppImage" \
-    "${LINUXDEPLOY_SHA256}"
-download_verified_tool \
-    "${LINUXDEPLOY_PLUGIN_QT_URL}" \
-    "${TOOLS_DIR}/linuxdeploy-plugin-qt-x86_64.AppImage" \
-    "${LINUXDEPLOY_PLUGIN_QT_SHA256}"
-
-echo "Building for QtWebEngine"
-build_appimage \
-    "-DSEB_FORCE_QTWEBENGINE=ON" \
-    "${BUILD_DIR}/release-qtwebengine" \
-    "${ARTIFACT_DIR}/${PACKAGE_NAME}-qt-x86_64.AppImage"
-
-echo "Building for WebKitGTK"
-build_appimage \
-    "-DSEB_FORCE_WEBKITGTK=ON" \
-    "${BUILD_DIR}/release-webkitgtk" \
-    "${ARTIFACT_DIR}/${PACKAGE_NAME}-gtk-x86_64.AppImage"
-
-echo "Artifacts written to ${ARTIFACT_DIR}"
+echo "Release artifacts written to ${DIST_DIR}:"
+ls -lh "${DIST_DIR}"
