@@ -4,9 +4,11 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QIcon>
+#include <QLoggingCategory>
 #include <QTextStream>
 #include <QProcess>
 #include <cstdio>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 namespace {
@@ -64,8 +66,11 @@ int main(int argc, char *argv[])
     if (!hasDevBypassArgument(argc, argv) && !validateEngineEnvironment(argc, argv)) return 1;
 #else
     if (!validateEngineEnvironment(argc, argv)) return 1;
+    // Prevent non-root debuggers/tracers from attaching via ptrace in user builds.
+    ::prctl(PR_SET_DUMPABLE, 0);
 #endif
 
+    QLoggingCategory::setFilterRules(QStringLiteral("qt.qpa.services.warning=false"));
     QApplication app(argc, argv);
 
     const QIcon appIcon(QStringLiteral(":/assets/icons/safe-exam-browser.png"));
@@ -88,6 +93,9 @@ int main(int argc, char *argv[])
     parser.addOption(QCommandLineOption(
         QStringList{QStringLiteral("dev-bypass")},
         QStringLiteral("Skip strict lockdowns and environment checks for development purposes.")));
+    parser.addOption(QCommandLineOption(
+        QStringList{QStringLiteral("anti-cheat")},
+        QStringLiteral("Enable strict superuser anti-cheat lockdown (always enforced in user builds).")));
 #endif
 
     parser.addPositionalArgument(
@@ -112,6 +120,9 @@ int main(int argc, char *argv[])
 #if defined(SEB_DEV_BYPASS_OPTION)
     if (parser.isSet(QStringLiteral("dev-bypass"))) {
         controller.setDevBypass(true);
+    }
+    if (parser.isSet(QStringLiteral("anti-cheat"))) {
+        controller.setAntiCheatEnabled(true);
     }
 #endif
     QString launchError;

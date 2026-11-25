@@ -14,6 +14,7 @@ class SebSession;
 class QWidget;
 
 namespace seb::security {
+class LockdownClient;
 class SecurityService;
 class SessionIntegrityStore;
 }
@@ -39,6 +40,7 @@ public:
     bool launch(const QString &resource, QString *error);
 #if defined(SEB_DEV_BYPASS_OPTION)
     void setDevBypass(bool enabled);
+    void setAntiCheatEnabled(bool enabled);
 #endif
 
 protected:
@@ -57,6 +59,9 @@ private:
     bool ensureBrowserProfileContext(const seb::settings::browser::BrowserSettings &settings, QString *error);
 
     void completeShutdown();
+    bool isAntiCheatEnforced() const;
+    bool ensureAntiCheatArmed(QString *error);
+    bool runProhibitedProcessPreflight(const seb::settings::AppSettings &settings, QString *error);
     bool validateSecuritySettings(const seb::settings::AppSettings &settings, QString *error);
     bool finalizeServerSession(QString *error = nullptr);
     bool initializeServerSession(
@@ -78,6 +83,7 @@ private:
     std::unique_ptr<seb::browser::contracts::IEngineProvider> browserEngineProvider_;
     std::unique_ptr<seb::browser::contracts::IWebProfile> browserProfile_;
     std::unique_ptr<SebSession> session_;
+    std::unique_ptr<seb::security::LockdownClient> lockdownClient_;
     std::unique_ptr<seb::security::SecurityService> security_;
     std::unique_ptr<seb::security::SessionIntegrityStore> sessionIntegrityStore_;
     std::unique_ptr<seb::server::ServerProxy> serverProxy_;
@@ -95,5 +101,6 @@ private:
     bool transitionPending_ = false;
 #if defined(SEB_DEV_BYPASS_OPTION)
     bool devBypass_ = false;
+    bool antiCheatEnabled_ = false;
 #endif
 };

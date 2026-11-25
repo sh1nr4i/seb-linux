@@ -10,9 +10,11 @@
 #include "server/data/exam.h"
 #include "server/server_proxy.h"
 #include "seb_session.h"
+#include "security/lockdown_client.h"
 #include "security/security_service.h"
 #include "security/session_integrity_store.h"
 #include "ui/runtime_window.h"
+#include "ui/taskbar/common/taskbar_style.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -28,6 +30,7 @@
 #include <QPushButton>
 #include <QEvent>
 #include <QApplication>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QTemporaryDir>
@@ -254,11 +257,60 @@ AppController::AppController(QObject *parent)
     sessionConfiguration_ = repository_.initializeSessionConfiguration();
     qApp->installEventFilter(this);
     qApp->setQuitOnLastWindowClosed(false);
+    lockdownClient_ = std::make_unique<seb::security::LockdownClient>(this);
     security_ = std::make_unique<seb::security::SecurityService>(this);
     sessionIntegrityStore_ = std::make_unique<seb::security::SessionIntegrityStore>(
         sessionConfiguration_.appConfig.sessionCacheFilePath);
+    connect(lockdownClient_.get(), &seb::security::LockdownClient::violationDetected, this,
+            [this](const QString &reason, const QStringList &) {
+                if (shuttingDown_) {
+                    return;
+                }
+                qCritical().noquote() << "[AntiCheat]" << reason;
+                lockdownClient_->stop();
+                QMessageBox::critical(
+                    mainWindow_,
+                    QStringLiteral("Anti-Cheat Security Violation"),
+                    reason + QStringLiteral("\n\nSafe Exam Browser will now close."));
+                shutdown();
+            },
+            Qt::QueuedConnection);
+    connect(lockdownClient_.get(), &seb::security::LockdownClient::helperTerminatedUnexpectedly, this,
+            [this](const QString &reason) {
+                if (shuttingDown_) {
+                    return;
+                }
+                qCritical().noquote() << "[AntiCheat]" << reason;
+                QMessageBox::critical(
+                    mainWindow_,
+                    QStringLiteral("Anti-Cheat Lockdown Interrupted"),
+                    reason + QStringLiteral("\n\nSafe Exam Browser will now close."));
+                shutdown();
+            },
+            Qt::QueuedConnection);
+    connect(lockdownClient_.get(), &seb::security::LockdownClient::altTabStepped, this,
+            [this](bool backwards) {
+                if (mainWindow_ && !shuttingDown_) {
+                    mainWindow_->stepWindowSwitcher(backwards);
+                }
+            });
+    connect(lockdownClient_.get(), &seb::security::LockdownClient::altTabCommitted, this,
+            [this] {
+                if (mainWindow_ && !shuttingDown_) {
+                    mainWindow_->commitWindowSwitcher();
+                }
+            });
+    connect(lockdownClient_.get(), &seb::security::LockdownClient::altTabCancelled, this,
+            [this] {
+                if (mainWindow_ && !shuttingDown_) {
+                    mainWindow_->cancelWindowSwitcher();
+                }
+            });
     connect(security_.get(), &seb::security::SecurityService::secureViolationDetected, this, [this](const QString &reason) {
         qCritical().noquote() << reason;
+        if (lockdownClient_) {
+            lockdownClient_->stop();
+        }
         shutdown();
     }, Qt::QueuedConnection);
 }
@@ -305,6 +357,9 @@ void AppController::shutdown()
     if (shuttingDown_) return;
     shuttingDown_ = true;
     security_->stopMonitoring();
+    if (lockdownClient_) {
+        lockdownClient_->stop();
+    }
     if (session_ && !serverProxy_) serverProxy_ = session_->takeServerProxy();
     if (session_) for (auto *window : session_->browserWindows()) window->setEnabled(false);
     auto finish = [this] { QTimer::singleShot(0, this, &AppController::completeShutdown); };
@@ -363,12 +418,136 @@ void AppController::setDevBypass(bool enabled)
 {
     devBypass_ = enabled;
 }
+
+void AppController::setAntiCheatEnabled(bool enabled)
+{
+    antiCheatEnabled_ = enabled;
+}
 #endif
+
+bool AppController::isAntiCheatEnforced() const
+{
+#if defined(SEB_DEV_BYPASS_OPTION)
+    return antiCheatEnabled_ || !devBypass_;
+#else
+    return true;
+#endif
+}
+
+bool AppController::ensureAntiCheatArmed(QString *error)
+{
+    if (!isAntiCheatEnforced()) {
+        security_->setLinuxLockdownActive(false);
+        return true;
+    }
+
+    if (lockdownClient_->isArmed()) {
+        security_->setLinuxLockdownActive(true);
+        return true;
+    }
+
+    QString helperError;
+    if (!lockdownClient_->startHelper(&helperError)) {
+        if (error) {
+            *error = helperError;
+        }
+        QMessageBox::critical(
+            mainWindow_,
+            QStringLiteral("Superuser Access Required"),
+            helperError.isEmpty()
+                ? QStringLiteral("Administrator privileges are required to activate Safe Exam Browser anti-cheat lockdown.")
+                : helperError);
+        return false;
+    }
+
+    security_->setLinuxLockdownActive(true);
+    return true;
+}
+
+bool AppController::runProhibitedProcessPreflight(
+    const seb::settings::AppSettings &settings,
+    QString *error)
+{
+    if (!isAntiCheatEnforced() || !lockdownClient_->isArmed()) {
+        return true;
+    }
+
+    const QStringList blacklist = seb::security::LockdownClient::buildProhibitedList(settings);
+    while (true) {
+        QStringList detected;
+        QString scanError;
+        if (!lockdownClient_->scanProhibitedProcesses(blacklist, detected, &scanError)) {
+            if (error) {
+                *error = scanError;
+            }
+            return false;
+        }
+
+        if (detected.isEmpty()) {
+            return true;
+        }
+
+        QDialog dialog(mainWindow_);
+        dialog.setWindowTitle(QStringLiteral("Prohibited Applications Running"));
+        dialog.setMinimumSize(460, 320);
+        dialog.setStyleSheet(QStringLiteral(
+            "QDialog { background: %1; color: black; }"
+            "QLabel { color: black; background: transparent; }"
+            "QListWidget { background: white; color: black; border: 1px solid gray; padding: 4px; }"
+            "QPushButton { background: lightgray; color: black; border: 1px solid gray; padding: 6px 14px; }"
+            "QPushButton:hover { background: %2; border: 1px solid %3; }"
+            "QPushButton:pressed { background: %2; border: 2px solid %4; }")
+                                 .arg(seb::ui::taskbar::backgroundColor().name(),
+                                      seb::ui::taskbar::hoverBackgroundColor().name(),
+                                      seb::ui::taskbar::hoverBorderColor().name(),
+                                      seb::ui::taskbar::pressedBorderColor().name()));
+
+        auto *layout = new QVBoxLayout(&dialog);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(10);
+
+        auto *infoLabel = new QLabel(
+            QStringLiteral("Aplikasi terlarang berikut masih berjalan. Tutup semua aplikasi tersebut lalu klik \"Cek Ulang\" untuk melanjutkan ke mode ujian terkunci:"),
+            &dialog);
+        infoLabel->setWordWrap(true);
+        layout->addWidget(infoLabel);
+
+        auto *listWidget = new QListWidget(&dialog);
+        listWidget->setSelectionMode(QAbstractItemView::NoSelection);
+        for (const QString &item : detected) {
+            listWidget->addItem(item);
+        }
+        layout->addWidget(listWidget, 1);
+
+        auto *buttonRow = new QHBoxLayout();
+        buttonRow->addStretch(1);
+        auto *recheckButton = new QPushButton(QStringLiteral("Cek Ulang"), &dialog);
+        recheckButton->setDefault(true);
+        auto *quitButton = new QPushButton(QStringLiteral("Keluar"), &dialog);
+        buttonRow->addWidget(recheckButton);
+        buttonRow->addWidget(quitButton);
+        layout->addLayout(buttonRow);
+
+        bool recheckRequested = false;
+        connect(recheckButton, &QPushButton::clicked, &dialog, [&] {
+            recheckRequested = true;
+            dialog.accept();
+        });
+        connect(quitButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+        if (dialog.exec() != QDialog::Accepted || !recheckRequested) {
+            if (error) {
+                *error = QStringLiteral("Exam startup cancelled because prohibited applications are still running.");
+            }
+            return false;
+        }
+    }
+}
 
 bool AppController::validateSecuritySettings(const seb::settings::AppSettings &settings, QString *error)
 {
 #if defined(SEB_DEV_BYPASS_OPTION)
-    if (devBypass_) {
+    if (devBypass_ && !antiCheatEnabled_) {
         qWarning() << "Developer bypass active; skipping strict security validation.";
         return true;
     }
@@ -647,6 +826,11 @@ bool AppController::launch(const QString &resource, QString *error)
         return false;
     }
     ReconfigurationGuard reconfigurationGuard(reconfigurationInProgress_, isReconfiguration);
+    if (!isReconfiguration && isAntiCheatEnforced()) {
+        if (!ensureAntiCheatArmed(error)) {
+            return false;
+        }
+    }
     const bool previousBrowserResource = session_ && session_->configuration().isBrowserResource;
     const QString previousAdminPasswordHash = session_
         ? session_->settings().Security.AdminPasswordHash
@@ -874,6 +1058,9 @@ bool AppController::launch(const QString &resource, QString *error)
     const bool applied = applySettings(sessionConfiguration_, warnings, error);
     if (!applied) {
         finalizeServerSession();
+        if (!isReconfiguration && lockdownClient_) {
+            lockdownClient_->stop();
+        }
         if (isReconfiguration) shutdown();
     }
     return applied;
@@ -972,7 +1159,7 @@ bool AppController::commitSettings(
     if (!ensureBrowserProfileContext(settings.Browser, error)) return false;
     const bool hasQuitPassword = !settings.Security.QuitPasswordHash.isEmpty();
 #if defined(SEB_DEV_BYPASS_OPTION)
-    if (!devBypass_) {
+    if (!devBypass_ || antiCheatEnabled_) {
         if (!sessionIntegrityStore_->prepare(
                 settings.Browser.ConfigurationKey,
                 hasQuitPassword,
@@ -1015,6 +1202,27 @@ bool AppController::commitSettings(
     }
 #endif
 
+    if (isAntiCheatEnforced()) {
+        if (!ensureAntiCheatArmed(error)) {
+            return false;
+        }
+        if (!lockdownClient_->isLocked()) {
+            if (!runProhibitedProcessPreflight(settings, error)) {
+                return false;
+            }
+            if (!lockdownClient_->activateLockdown(
+                    seb::security::LockdownClient::keyboardPolicyFromSettings(settings),
+                    seb::security::LockdownClient::buildProhibitedList(settings),
+                    error)) {
+                return false;
+            }
+        } else {
+            lockdownClient_->updatePolicy(
+                seb::security::LockdownClient::keyboardPolicyFromSettings(settings),
+                seb::security::LockdownClient::buildProhibitedList(settings));
+        }
+    }
+
     if (!runtimeWindow_) {
         runtimeWindow_ = std::make_unique<RuntimeWindow>();
     }
@@ -1044,6 +1252,7 @@ bool AppController::commitSettings(
 
     connect(nextSession.get(), &SebSession::shutdownRequested, this, &AppController::shutdown, Qt::QueuedConnection);
     BrowserWindow *nextWindow = nextSession->createWindow(nextSession->initialUrl(), true);
+    nextWindow->setLockdownActive(isAntiCheatEnforced());
     runtimeWindow_->setStatusText(QStringLiteral("Opening secure browser window"));
 
     nextWindow->showFullScreen();
@@ -1053,7 +1262,7 @@ bool AppController::commitSettings(
     session_ = std::move(nextSession);
     session_->startRuntimeMonitoring();
 #if defined(SEB_DEV_BYPASS_OPTION)
-    if (!devBypass_) {
+    if (!devBypass_ || antiCheatEnabled_) {
         security_->startMonitoring();
     } else {
         qWarning() << "Developer bypass active; security monitoring disabled.";

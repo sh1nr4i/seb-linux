@@ -22,6 +22,8 @@ public:
 
     void startMonitoring();
     void stopMonitoring();
+    void setLinuxLockdownActive(bool active);
+    bool isLinuxLockdownActive() const { return linuxLockdownActive_; }
 
 protected:
     void timerEvent(QTimerEvent *event) override;
@@ -38,6 +40,7 @@ private:
     seb::settings::applications::ApplicationSettings applications_;
     bool alwaysOnRequired_ = false;
     bool violationReported_ = false;
+    bool linuxLockdownActive_ = false;
     int timerId_ = -1;
     QProcess idleInhibitor_;
 };

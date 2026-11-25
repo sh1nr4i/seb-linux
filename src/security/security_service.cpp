@@ -116,18 +116,18 @@ bool SecurityService::validateSettings(const seb::settings::AppSettings &setting
         return reject(error, QStringLiteral("This exam does not permit virtual machines."));
     if (settings.Security.VerifyCursorConfiguration)
         return reject(error, QStringLiteral("This exam requires cursor integrity verification, which is unavailable on Linux."));
-    if (!settings.Service.IgnoreService && settings.Service.Policy == seb::settings::service::ServicePolicy::Mandatory)
+    if (!settings.Service.IgnoreService && settings.Service.Policy == seb::settings::service::ServicePolicy::Mandatory && !linuxLockdownActive_)
         return reject(error, QStringLiteral("This exam requires a privileged SEB service, which is unavailable on Linux."));
-    if (!settings.Service.IgnoreService && settings.Service.Policy == seb::settings::service::ServicePolicy::Optional &&
+    if (!linuxLockdownActive_ && !settings.Service.IgnoreService && settings.Service.Policy == seb::settings::service::ServicePolicy::Optional &&
         (settings.Service.DisableUserLock || settings.Service.DisableUserSwitch || settings.Service.DisableChromeNotifications ||
          settings.Service.DisableEaseOfAccessOptions || settings.Service.DisableFindPrinter || settings.Service.DisableNetworkOptions ||
          settings.Service.DisablePasswordChange || settings.Service.DisablePowerOptions || settings.Service.DisableRemoteConnections ||
          settings.Service.DisableSignout || settings.Service.DisableTaskManager || settings.Service.DisableVmwareOverlay ||
          settings.Service.DisableWindowsUpdate || settings.Service.SetVmwareConfiguration))
         return reject(error, QStringLiteral("This exam requests privileged system restrictions that the Linux client cannot apply or restore."));
-    if (settings.Security.KioskMode != seb::settings::security::KioskMode::None)
+    if (settings.Security.KioskMode != seb::settings::security::KioskMode::None && !linuxLockdownActive_)
         return reject(error, QStringLiteral("This exam requires Windows kiosk mode. Linux cannot create an isolated desktop or disable and restore the desktop shell, so the exam cannot start securely."));
-    if (!settings.Security.AllowWindowCapture)
+    if (!settings.Security.AllowWindowCapture && !linuxLockdownActive_)
         return reject(error, QStringLiteral("This exam prohibits screen capture or sharing. Linux desktop environments do not provide a portable SEB control to enforce this setting."));
     if (settings.Security.DisableSessionChangeLockScreen)
         return reject(error, QStringLiteral("This exam requires control of the session-change lock screen, which is unavailable on Linux."));
@@ -179,6 +179,11 @@ void SecurityService::stopMonitoring()
             idleInhibitor_.waitForFinished(1000);
         }
     }
+}
+
+void SecurityService::setLinuxLockdownActive(bool active)
+{
+    linuxLockdownActive_ = active;
 }
 
 void SecurityService::performCheck()
