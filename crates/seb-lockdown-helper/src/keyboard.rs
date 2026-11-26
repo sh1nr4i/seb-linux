@@ -139,6 +139,7 @@ pub enum FilterAction {
     NavBack,
     NavForward,
     NavHome,
+    CloseActiveWindow,
 }
 
 #[derive(Debug, Default)]
@@ -366,6 +367,16 @@ impl KeyFilterState {
                         backwards: self.shift_held(),
                     },
                 );
+            }
+            return (side_event, FilterAction::Drop);
+        }
+
+        // Translate Alt+F4 via IPC so SEB closes its own active internal window (or requests quit
+        // with Quit Password) without ever forwarding Alt+F4 to the OS compositor!
+        if alt && !ctrl && !meta && code == (KEY_F1 + 3) {
+            if value == 1 {
+                self.suppressed_keys.insert((device_id, code));
+                return (side_event, FilterAction::CloseActiveWindow);
             }
             return (side_event, FilterAction::Drop);
         }
@@ -756,7 +767,10 @@ impl KeyboardBlocker {
                 FilterAction::AltTabCommit => {
                     ipc_out.push(FilterAction::AltTabCommit);
                 }
-                FilterAction::NavBack | FilterAction::NavForward | FilterAction::NavHome => {
+                FilterAction::NavBack
+                | FilterAction::NavForward
+                | FilterAction::NavHome
+                | FilterAction::CloseActiveWindow => {
                     ipc_out.push(action);
                 }
             }

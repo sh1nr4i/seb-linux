@@ -205,6 +205,9 @@ fn main() {
                     FilterAction::NavHome => {
                         write_json_line(&json!({ "event": "nav_home" }));
                     }
+                    FilterAction::CloseActiveWindow => {
+                        write_json_line(&json!({ "event": "close_window" }));
+                    }
                     _ => {}
                 }
             }

@@ -394,7 +394,7 @@ impl SessionIntegrityStore {
                 }
                 return Err("Session verification requires a valid configuration key.".to_string());
             }
-            let records = match self.read_records() {
+            let mut records = match self.read_records() {
                 Ok(r) => r,
                 Err(e) => {
                     if self.active_key.is_empty() {
@@ -405,13 +405,10 @@ impl SessionIntegrityStore {
             };
             if records.iter().any(|k| k == configuration_key) && configuration_key != self.active_key
             {
-                if self.active_key.is_empty() {
-                    self.release();
-                }
-                return Err(
-                    "This configuration was found in unfinished session history. The previous exam session did not shut down cleanly."
-                        .to_string(),
-                );
+                // Automatically clear stale unfinished-session record from a previous crash/cancel
+                // so the user is never permanently locked out of re-entering the exam.
+                records.retain(|k| k != configuration_key);
+                let _ = self.write_records(&records);
             }
         }
 
@@ -445,10 +442,7 @@ impl SessionIntegrityStore {
             && records.iter().any(|k| k == configuration_key)
             && configuration_key != self.active_key
         {
-            return Err(
-                "This configuration was found in unfinished session history. The previous exam session did not shut down cleanly."
-                    .to_string(),
-            );
+            records.retain(|k| k != configuration_key);
         }
 
         if !self.active_key.is_empty() {
@@ -685,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn session_integrity_detects_dirty_shutdown_and_clears_on_clean() {
+    fn session_integrity_clears_stale_session_and_allows_restart() {
         let dir = std::env::temp_dir().join(format!("seb-rust-sec-test-{}", unsafe {
             libc::getpid()
         }));
@@ -700,11 +694,7 @@ mod tests {
             store.finish(false).unwrap();
         }
         {
-            let mut store = SessionIntegrityStore::new(&path);
-            assert!(store.prepare(&key, true, true).is_err());
-        }
-        let _ = fs::remove_file(&path);
-        {
+            // Stale record from an unclean shutdown is automatically cleared on next start
             let mut store = SessionIntegrityStore::new(&path);
             store.prepare(&key, true, true).unwrap();
             store.activate(&key, true, true).unwrap();

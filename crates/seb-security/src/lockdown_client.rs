@@ -127,6 +127,7 @@ pub enum LockdownEvent {
     NavBack,
     NavForward,
     NavHome,
+    CloseActiveWindow,
     Violation { reason: String, prohibited: Vec<String> },
     HelperTerminated { reason: String },
 }
@@ -384,6 +385,9 @@ impl LockdownClient {
                     }
                     "nav_home" => {
                         let _ = event_tx.send(LockdownEvent::NavHome);
+                    }
+                    "close_window" => {
+                        let _ = event_tx.send(LockdownEvent::CloseActiveWindow);
                     }
                     "error" => {
                         let msg = val
