@@ -145,7 +145,13 @@ impl PowerInhibitor {
         let Some(ref mut c) = self.child else {
             return false;
         };
-        matches!(c.try_wait(), Ok(None))
+        match c.try_wait() {
+            Ok(None) => true,
+            _ => {
+                self.child = None;
+                false
+            }
+        }
     }
 
     pub fn stop(&mut self) {
@@ -155,20 +161,22 @@ impl PowerInhibitor {
             let _ = conn.call_method(Some(dest), path, Some(iface), method, &(cookie,));
         }
         if let Some(mut c) = self.child.take() {
-            unsafe {
-                libc::kill(c.id() as libc::pid_t, libc::SIGTERM);
-            }
-            let deadline = Instant::now() + Duration::from_secs(1);
-            loop {
-                if let Ok(Some(_)) = c.try_wait() {
-                    break;
+            if matches!(c.try_wait(), Ok(None)) {
+                unsafe {
+                    libc::kill(c.id() as libc::pid_t, libc::SIGTERM);
                 }
-                if Instant::now() >= deadline {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                    break;
+                let deadline = Instant::now() + Duration::from_secs(1);
+                loop {
+                    if let Ok(Some(_)) = c.try_wait() {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(25));
                 }
-                thread::sleep(Duration::from_millis(25));
             }
         }
     }

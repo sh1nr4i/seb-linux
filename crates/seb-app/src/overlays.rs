@@ -2,8 +2,9 @@ use crate::assets;
 use crate::browser_pane::BrowserPane;
 use crate::taskbar::audio_svg_for;
 use gtk::prelude::*;
-use seb_config::settings::AppSettings;
+use seb_config::settings::{AppSettings, SessionMode, UserInterfaceMode};
 use seb_platform::{PlatformMonitor, PlatformSnapshot};
+use seb_proctoring::client::ProctoringState;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -16,19 +17,37 @@ const MAX_COLUMNS: i32 = 4;
 
 // =========================================================================
 // Action Center Sidebar (Super+A -> Ctrl+Shift+A):
-// - Transparent click-outside scrim for instant outside-click dismissal!
+// - Slide-in revealer + transparent click-outside scrim!
 // - Dynamic icons & live 1s refresh while visible!
-// - Application Log tile, clickable Audio/Keyboard tiles, accurate Battery text!
+// - Raise Hand, Screen Proctoring, inline Audio slider, Mobile OSK tile!
 // =========================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionCenterTileAction {
+    About,
+    Log,
+    Keyboard,
+    Network,
+    Audio,
+    Battery,
+    RaiseHand,
+    Proctoring,
+    OnScreenKeyboard,
+    Quit,
+}
 
 pub struct ActionCenterOverlay {
     pub root: gtk::Box,
+    revealer: gtk::Revealer,
     windows_box: gtk::Box,
     clock_label: Option<gtk::Label>,
     audio_tile: Option<(gtk::Image, gtk::Label)>,
+    inline_audio: Option<(gtk::Button, gtk::Scale, gtk::Label, Rc<Cell<bool>>)>,
     battery_tile: Option<(gtk::Image, gtk::Label)>,
     network_tile: Option<(gtk::Image, gtk::Label)>,
     keyboard_label: Option<gtk::Label>,
+    raise_hand_tile: Option<(gtk::Image, gtk::Label)>,
+    proctoring_tile: Option<(gtk::Button, gtk::Image, gtk::Label)>,
     crit_thresh: f64,
     low_thresh: f64,
 }
@@ -37,9 +56,7 @@ impl ActionCenterOverlay {
     pub fn new(
         settings: &AppSettings,
         platform: Rc<PlatformMonitor>,
-        on_about: Rc<dyn Fn()>,
-        on_log: Rc<dyn Fn()>,
-        on_quit: Rc<dyn Fn()>,
+        on_tile: Rc<dyn Fn(ActionCenterTileAction)>,
     ) -> Rc<Self> {
         // Horizontal full-width overlay container: [368px Sidebar | Transparent click-outside Scrim]
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -48,10 +65,16 @@ impl ActionCenterOverlay {
         root.set_no_show_all(true);
         root.hide();
 
+        let revealer = gtk::Revealer::new();
+        revealer.set_transition_type(gtk::RevealerTransitionType::SlideRight);
+        revealer.set_transition_duration(140);
+        revealer.set_reveal_child(false);
+
         let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
         panel.style_context().add_class("seb-action-center");
         panel.set_size_request(SIDEBAR_WIDTH, -1);
-        root.pack_start(&panel, false, false, 0);
+        revealer.add(&panel);
+        root.pack_start(&revealer, false, false, 0);
 
         // Transparent click-outside scrim (dismisses Action Center on click outside!)
         let scrim = gtk::EventBox::new();
@@ -59,7 +82,9 @@ impl ActionCenterOverlay {
         scrim.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
         {
             let r = root.clone();
+            let rev = revealer.clone();
             scrim.connect_button_press_event(move |_, _| {
+                rev.set_reveal_child(false);
                 r.hide();
                 glib::Propagation::Stop
             });
@@ -115,45 +140,33 @@ impl ActionCenterOverlay {
 
         if ac.show_application_info {
             let (btn, _, _) = mk_tile(assets::ICON_ABOUT_SVG, "Information\nabout SEB");
-            let cb = Rc::clone(&on_about);
+            let cb = Rc::clone(&on_tile);
             let r = root.clone();
             btn.connect_clicked(move |_| {
                 r.hide();
-                cb();
+                cb(ActionCenterTileAction::About);
             });
             add_tile(&btn);
         }
 
         if ac.show_application_log && settings.security.allow_application_log {
             let (btn, _, _) = mk_tile(assets::ICON_LOG_SVG, "Application\nLog");
-            let cb = Rc::clone(&on_log);
+            let cb = Rc::clone(&on_tile);
             let r = root.clone();
             btn.connect_clicked(move |_| {
                 r.hide();
-                cb();
+                cb(ActionCenterTileAction::Log);
             });
             add_tile(&btn);
         }
 
         let keyboard_label = if ac.show_keyboard_layout {
             let (btn, _, lbl) = mk_tile(assets::keyboard_icon_svg(), "Keyboard");
-            let plat = Rc::clone(&platform);
-            let lbl_c = lbl.clone();
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
             btn.connect_clicked(move |_| {
-                let kb = plat.snapshot().keyboard;
-                if kb.available_layouts.len() > 1 {
-                    let cur = kb
-                        .available_layouts
-                        .iter()
-                        .position(|l| l.eq_ignore_ascii_case(&kb.current_short_name))
-                        .unwrap_or(0);
-                    let next = (cur + 1) % kb.available_layouts.len();
-                    let next_code = &kb.available_layouts[next];
-                    if seb_platform::switch_keyboard_layout(next_code, next) {
-                        plat.update_keyboard_cached(next_code);
-                        lbl_c.set_text(&next_code.to_ascii_uppercase());
-                    }
-                }
+                r.hide();
+                cb(ActionCenterTileAction::Keyboard);
             });
             add_tile(&btn);
             Some(lbl)
@@ -163,6 +176,12 @@ impl ActionCenterOverlay {
 
         let network_tile = if ac.show_network {
             let (btn, img, lbl) = mk_tile(assets::ICON_WIFI_0_SVG, "Network");
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
+            btn.connect_clicked(move |_| {
+                r.hide();
+                cb(ActionCenterTileAction::Network);
+            });
             add_tile(&btn);
             Some((img, lbl))
         } else {
@@ -171,25 +190,11 @@ impl ActionCenterOverlay {
 
         let audio_tile = if ac.show_audio {
             let (btn, img, lbl) = mk_tile(assets::ICON_AUDIO_100_SVG, "Audio");
-            let plat = Rc::clone(&platform);
-            let img_c = img.clone();
-            let lbl_c = lbl.clone();
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
             btn.connect_clicked(move |_| {
-                let st = plat.snapshot().audio;
-                if st.available {
-                    let next_muted = !st.muted;
-                    seb_platform::set_audio_muted(next_muted);
-                    plat.update_audio_cached(Some(next_muted), None);
-                    let updated = plat.snapshot().audio;
-                    if let Some(pb) = assets::pixbuf_from_bytes(audio_svg_for(&updated), 22, 22) {
-                        img_c.set_from_pixbuf(Some(&pb));
-                    }
-                    lbl_c.set_text(if updated.muted {
-                        "Muted"
-                    } else {
-                        "Audio"
-                    });
-                }
+                r.hide();
+                cb(ActionCenterTileAction::Audio);
             });
             add_tile(&btn);
             Some((img, lbl))
@@ -202,6 +207,12 @@ impl ActionCenterOverlay {
             if st.available {
                 let (btn, img, lbl) =
                     mk_tile(assets::ICON_BATTERY_SVG, &format!("Battery\n({}%)", st.percentage));
+                let cb = Rc::clone(&on_tile);
+                let r = root.clone();
+                btn.connect_clicked(move |_| {
+                    r.hide();
+                    cb(ActionCenterTileAction::Battery);
+                });
                 add_tile(&btn);
                 Some((img, lbl))
             } else {
@@ -217,26 +228,131 @@ impl ActionCenterOverlay {
             None
         };
 
+        // Raise Hand tile (SEB Server sessions)
+        let raise_hand_tile = if settings.session_mode == SessionMode::Server
+            && settings.server.show_raise_hand
+        {
+            let (btn, img, lbl) = mk_tile(assets::ICON_HAND_LOWERED_SVG, "Raise\nHand");
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
+            btn.connect_clicked(move |_| {
+                r.hide();
+                cb(ActionCenterTileAction::RaiseHand);
+            });
+            add_tile(&btn);
+            Some((img, lbl))
+        } else {
+            None
+        };
+
+        // Screen Proctoring status tile (shown only when proctoring active)
+        let proctoring_tile = {
+            let (btn, img, lbl) = mk_tile(assets::ICON_PROCTORING_SVG, "Proctoring");
+            btn.set_no_show_all(true);
+            btn.hide();
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
+            btn.connect_clicked(move |_| {
+                r.hide();
+                cb(ActionCenterTileAction::Proctoring);
+            });
+            add_tile(&btn);
+            Some((btn, img, lbl))
+        };
+
+        // Mobile / Touch On-Screen Keyboard tile
+        if settings.user_interface.mode == UserInterfaceMode::Mobile {
+            let (btn, _, _) = mk_tile(assets::keyboard_icon_svg(), "On-Screen\nKeyboard");
+            let cb = Rc::clone(&on_tile);
+            let r = root.clone();
+            btn.connect_clicked(move |_| {
+                r.hide();
+                cb(ActionCenterTileAction::OnScreenKeyboard);
+            });
+            add_tile(&btn);
+        }
+
         let (quit_btn, _, _) = mk_tile(assets::ICON_SHUTDOWN_SVG, "Terminate\nSession");
         quit_btn.set_sensitive(settings.security.allow_termination);
         {
-            let cb = Rc::clone(&on_quit);
+            let cb = Rc::clone(&on_tile);
             let r = root.clone();
             quit_btn.connect_clicked(move |_| {
                 r.hide();
-                cb();
+                cb(ActionCenterTileAction::Quit);
             });
         }
         add_tile(&quit_btn);
 
+        // Inline Audio Volume Slider directly inside Action Center (3.3)
+        let inline_audio = if ac.show_audio {
+            let st = platform.snapshot().audio;
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.set_margin_top(4);
+            let mute_btn = gtk::Button::new();
+            mute_btn.style_context().add_class("seb-chrome-btn");
+            mute_btn.set_can_focus(false);
+            mute_btn.set_size_request(34, 30);
+            mute_btn.set_image(Some(&assets::image_from_bytes(audio_svg_for(&st), 18, 18)));
+            let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 2.0);
+            scale.set_draw_value(false);
+            scale.set_value(st.volume_percent as f64);
+            let pct_lbl = gtk::Label::new(Some(&format!("{}%", st.volume_percent)));
+            pct_lbl.set_size_request(38, -1);
+            let updating = Rc::new(Cell::new(false));
+            {
+                let plat = Rc::clone(&platform);
+                let lbl_c = pct_lbl.clone();
+                let mb_c = mute_btn.clone();
+                let upd = Rc::clone(&updating);
+                scale.connect_value_changed(move |s| {
+                    if upd.get() {
+                        return;
+                    }
+                    let pct = s.value().round() as i32;
+                    lbl_c.set_text(&format!("{pct}%"));
+                    seb_platform::set_audio_volume(pct);
+                    plat.update_audio_cached(None, Some(pct));
+                    let cur = plat.snapshot().audio;
+                    mb_c.set_image(Some(&assets::image_from_bytes(audio_svg_for(&cur), 18, 18)));
+                });
+            }
+            {
+                let plat = Rc::clone(&platform);
+                mute_btn.connect_clicked(move |b| {
+                    let cur = plat.snapshot().audio;
+                    let next = !cur.muted;
+                    seb_platform::set_audio_muted(next);
+                    plat.update_audio_cached(Some(next), None);
+                    let updated = plat.snapshot().audio;
+                    b.set_image(Some(&assets::image_from_bytes(
+                        audio_svg_for(&updated),
+                        18,
+                        18,
+                    )));
+                });
+            }
+            row.pack_start(&mute_btn, false, false, 0);
+            row.pack_start(&scale, true, true, 0);
+            row.pack_start(&pct_lbl, false, false, 0);
+            inner.pack_start(&row, false, false, 2);
+            Some((mute_btn, scale, pct_lbl, updating))
+        } else {
+            None
+        };
+
         Rc::new(Self {
             root,
+            revealer,
             windows_box,
             clock_label,
             audio_tile,
+            inline_audio,
             battery_tile,
             network_tile,
             keyboard_label,
+            raise_hand_tile,
+            proctoring_tile,
             crit_thresh: settings.power_supply.charge_threshold_critical,
             low_thresh: settings.power_supply.charge_threshold_low,
         })
@@ -249,17 +365,59 @@ impl ActionCenterOverlay {
         on_focus: Rc<dyn Fn(u64)>,
     ) {
         if self.root.is_visible() {
-            self.root.hide();
+            self.hide();
         } else {
             self.refresh_windows(panes, on_focus);
             self.refresh_tiles(snap);
             self.root.set_no_show_all(false);
             self.root.show_all();
+            self.revealer.set_reveal_child(true);
         }
     }
 
     pub fn hide(&self) {
+        self.revealer.set_reveal_child(false);
         self.root.hide();
+    }
+
+    pub fn set_hand_raised(&self, raised: bool) {
+        if let Some((ref img, ref lbl)) = self.raise_hand_tile {
+            let svg = if raised {
+                assets::ICON_HAND_RAISED_SVG
+            } else {
+                assets::ICON_HAND_LOWERED_SVG
+            };
+            if let Some(pb) = assets::pixbuf_from_bytes(svg, 22, 22) {
+                img.set_from_pixbuf(Some(&pb));
+            }
+            lbl.set_text(if raised {
+                "Hand\nRaised"
+            } else {
+                "Raise\nHand"
+            });
+        }
+    }
+
+    pub fn update_proctoring_status(&self, state: ProctoringState, text: &str, show_tile: bool) {
+        if let Some((ref btn, ref img, ref lbl)) = self.proctoring_tile {
+            if !show_tile {
+                btn.set_no_show_all(true);
+                btn.hide();
+                return;
+            }
+            if let Some(pb) = assets::pixbuf_from_bytes(assets::ICON_PROCTORING_SVG, 22, 22) {
+                img.set_from_pixbuf(Some(&pb));
+            }
+            lbl.set_text(match state {
+                ProctoringState::Active => "Proctoring\nActive",
+                ProctoringState::Connecting => "Proctoring\nConnecting",
+                ProctoringState::Error => "Proctoring\nError",
+                ProctoringState::Inactive => "Proctoring",
+            });
+            btn.set_tooltip_text(Some(text));
+            btn.set_no_show_all(false);
+            btn.show_all();
+        }
     }
 
     pub fn is_visible(&self) -> bool {
@@ -275,12 +433,11 @@ impl ActionCenterOverlay {
             btn.style_context().add_class("seb-ac-win-row");
             btn.set_can_focus(false);
             let hb = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            hb.pack_start(
-                &assets::image_from_bytes(assets::ICON_SEB_PNG, 20, 20),
-                false,
-                false,
-                0,
-            );
+            let icon = match pane.favicon_pixbuf(20) {
+                Some(pb) => gtk::Image::from_pixbuf(Some(&pb)),
+                None => assets::image_from_bytes(assets::ICON_SEB_PNG, 20, 20),
+            };
+            hb.pack_start(&icon, false, false, 0);
             let lbl = gtk::Label::new(Some(&pane.title()));
             lbl.set_xalign(0.0);
             lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -320,6 +477,14 @@ impl ActionCenterOverlay {
             } else {
                 format!("Audio ({}%)", st.volume_percent)
             });
+        }
+        if let Some((ref mb, ref scale, ref pct_lbl, ref upd)) = self.inline_audio {
+            let st = &snap.audio;
+            upd.set(true);
+            scale.set_value(st.volume_percent as f64);
+            pct_lbl.set_text(&format!("{}%", st.volume_percent));
+            mb.set_image(Some(&assets::image_from_bytes(audio_svg_for(st), 18, 18)));
+            upd.set(false);
         }
 
         if let Some((ref img, ref lbl)) = self.battery_tile {
@@ -440,10 +605,10 @@ impl WindowSwitcherOverlay {
         panes: &[Rc<BrowserPane>],
         active_id: u64,
         on_commit_id: Rc<dyn Fn(u64)>,
-    ) {
+    ) -> Option<u64> {
         if panes.is_empty() {
             self.root.hide();
-            return;
+            return None;
         }
 
         if !self.root.is_visible() {
@@ -463,13 +628,13 @@ impl WindowSwitcherOverlay {
             self.update_selection_styles();
             self.root.set_no_show_all(false);
             self.root.show_all();
-            return;
+            return self.selected_id();
         }
 
         let count = self.entries.borrow().len();
         if count == 0 {
             self.root.hide();
-            return;
+            return None;
         }
         let cur = self.selected_index.get();
         let next = if backwards {
@@ -479,6 +644,14 @@ impl WindowSwitcherOverlay {
         };
         self.selected_index.set(next);
         self.update_selection_styles();
+        self.selected_id()
+    }
+
+    pub fn selected_id(&self) -> Option<u64> {
+        self.entries
+            .borrow()
+            .get(self.selected_index.get())
+            .map(|(id, _)| *id)
     }
 
     pub fn commit(&self) -> Option<u64> {
@@ -513,12 +686,11 @@ impl WindowSwitcherOverlay {
             card_frame.set_size_request(CARD_WIDTH, CARD_HEIGHT);
 
             let hdr = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            hdr.pack_start(
-                &assets::image_from_bytes(assets::ICON_SEB_PNG, 14, 14),
-                false,
-                false,
-                0,
-            );
+            let hdr_icon = match pane.favicon_pixbuf(14) {
+                Some(pb) => gtk::Image::from_pixbuf(Some(&pb)),
+                None => assets::image_from_bytes(assets::ICON_SEB_PNG, 14, 14),
+            };
+            hdr.pack_start(&hdr_icon, false, false, 0);
             let title = pane.title();
             let short = if title.chars().count() > 26 {
                 format!("{}...", title.chars().take(23).collect::<String>())
@@ -533,13 +705,22 @@ impl WindowSwitcherOverlay {
             let thumb_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
             thumb_box.style_context().add_class("seb-switcher-thumb");
             thumb_box.set_size_request(THUMB_WIDTH, THUMB_HEIGHT);
-            if let Some(pb) = pane.preview_pixbuf(THUMB_WIDTH - 2, THUMB_HEIGHT - 2) {
-                thumb_box.pack_start(&gtk::Image::from_pixbuf(Some(&pb)), true, true, 0);
-            } else {
-                let placeholder = gtk::Label::new(Some("Safe Exam Browser"));
-                thumb_box.pack_start(&placeholder, true, true, 0);
-            }
+            let thumb_img = match pane.preview_pixbuf(THUMB_WIDTH - 2, THUMB_HEIGHT - 2) {
+                Some(pb) => gtk::Image::from_pixbuf(Some(&pb)),
+                None => gtk::Image::new(),
+            };
+            thumb_box.pack_start(&thumb_img, true, true, 0);
             card_frame.pack_start(&thumb_box, true, true, 0);
+
+            // Refresh live accelerated WebView preview asynchronously for this card
+            let thumb_img_live = thumb_img.clone();
+            pane.refresh_preview_async(
+                THUMB_WIDTH - 2,
+                THUMB_HEIGHT - 2,
+                Some(Box::new(move |pb| {
+                    thumb_img_live.set_from_pixbuf(Some(&pb));
+                })),
+            );
 
             card.add(&card_frame);
             let win_id = pane.id;

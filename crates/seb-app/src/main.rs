@@ -13,7 +13,7 @@ use shell::{LaunchOptions, SebAppShell};
 use std::process::ExitCode;
 
 fn print_help() {
-    println!("Safe Exam Browser for Linux {SEB_APPLICATION_VERSION} (SEB/{SEB_COMPATIBILITY_VERSION}) — 100% Pure Rust");
+    println!("Safe Exam Browser for Linux {SEB_APPLICATION_VERSION} (SEB/{SEB_COMPATIBILITY_VERSION}) — Rust");
     println!();
     println!("Usage: safe-exam-browser [OPTIONS] [resource]");
     println!();

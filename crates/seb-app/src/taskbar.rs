@@ -2,7 +2,7 @@ use crate::applications::{ApplicationManager, ManagedExternalApp};
 use crate::assets;
 use crate::dialogs;
 use gtk::prelude::*;
-use seb_config::settings::{AppSettings, SessionMode};
+use seb_config::settings::{AppSettings, SessionMode, UserInterfaceMode};
 use seb_platform::{PlatformMonitor, PlatformSnapshot};
 use seb_proctoring::client::ProctoringState;
 use std::cell::{Cell, RefCell};
@@ -23,6 +23,7 @@ pub enum TaskbarAction {
     ShowVerificator,
     RaiseHand(String),
     LowerHand,
+    ToggleOnScreenKeyboard,
     RequestQuit,
 }
 
@@ -73,6 +74,7 @@ impl SebTaskbar {
             b.set_can_focus(false);
             b.set_size_request(width, TASKBAR_HEIGHT);
             b.set_tooltip_text(Some(tip));
+            b.set_always_show_image(true);
             b.set_image(Some(&assets::image_from_bytes(bytes, 22, 22)));
             b
         };
@@ -109,23 +111,26 @@ impl SebTaskbar {
         app_strip.pack_start(&browser_btn, false, false, 0);
 
         // Shared rectangular taskbar popup overlay (pure flat box, zero GTK '>' / 'v' arrow tails!)
+        // Keep `popup_layer` strictly ABOVE the 40px taskbar (`margin_bottom(TASKBAR_HEIGHT)`) so
+        // its scrim never intercepts clicks or steals pointer hover from bottom-bar buttons!
         let popup_layer = gtk::Overlay::new();
         popup_layer.set_halign(gtk::Align::Fill);
         popup_layer.set_valign(gtk::Align::Fill);
+        popup_layer.set_margin_bottom(TASKBAR_HEIGHT);
         let scrim = gtk::EventBox::new();
         scrim.set_visible_window(false);
         scrim.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
         popup_layer.add(&scrim);
 
         let popup_card = gtk::EventBox::new();
-        popup_card.set_visible_window(true);
-        popup_card.style_context().add_class("seb-popup");
+        popup_card.set_visible_window(false);
         popup_card.add_events(
             gdk::EventMask::BUTTON_PRESS_MASK
                 | gdk::EventMask::ENTER_NOTIFY_MASK
                 | gdk::EventMask::LEAVE_NOTIFY_MASK,
         );
         let popup_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        popup_body.style_context().add_class("seb-popup");
         popup_card.add(&popup_body);
         popup_layer.add_overlay(&popup_card);
 
@@ -180,26 +185,27 @@ impl SebTaskbar {
         // Quit (hidden when !allow_termination)
         // =====================================================================
         if tb_cfg.show_application_info {
-            // C++ NotificationControl(enabled=false): passive indicator
             let b = mk_icon_btn(assets::ICON_ABOUT_SVG, "Application information", 40);
-            b.set_sensitive(false);
+            let cb = Rc::clone(&on_action);
+            b.connect_clicked(move |_| cb(TaskbarAction::ShowAbout));
             root.pack_start(&b, false, false, 0);
         }
 
         if tb_cfg.show_application_log && settings.security.allow_application_log {
             let b = mk_icon_btn(assets::ICON_LOG_SVG, "Application log", 40);
-            b.set_sensitive(false);
+            let cb = Rc::clone(&on_action);
+            b.connect_clicked(move |_| cb(TaskbarAction::ShowLog));
             root.pack_start(&b, false, false, 0);
         }
 
         if tb_cfg.show_verificator {
             let b = mk_icon_btn(assets::ICON_VERIFICATOR_SVG, "SEB Verificator", 40);
-            b.set_sensitive(false);
+            let cb = Rc::clone(&on_action);
+            b.connect_clicked(move |_| cb(TaskbarAction::ShowVerificator));
             root.pack_start(&b, false, false, 0);
         }
 
         let proctoring_btn = mk_icon_btn(assets::ICON_PROCTORING_SVG, "Screen Proctoring (Window only): Inactive", 40);
-        proctoring_btn.set_sensitive(false);
         proctoring_btn.set_no_show_all(true);
         proctoring_btn.hide();
         root.pack_start(&proctoring_btn, false, false, 0);
@@ -248,6 +254,14 @@ impl SebTaskbar {
         } else {
             None
         };
+
+        // Mobile / Touch UI Mode: On-Screen Keyboard (OSK) toggle button (4.6)
+        if settings.user_interface.mode == UserInterfaceMode::Mobile {
+            let osk_btn = mk_icon_btn(assets::keyboard_icon_svg(), "On-Screen Keyboard", 44);
+            let cb = Rc::clone(&on_action);
+            osk_btn.connect_clicked(move |_| cb(TaskbarAction::ToggleOnScreenKeyboard));
+            root.pack_start(&osk_btn, false, false, 0);
+        }
 
         // Stacked ClockWidget (bold time + short date in #696969, 15px horizontal margin)
         let (clock_time_label, clock_date_label) = if tb_cfg.show_clock {
@@ -318,16 +332,16 @@ impl SebTaskbar {
                 let w = nat.width.max(60);
                 let h = nat.height.max(32);
                 let ov_w = ov.allocated_width().max(w + 16);
-                let ov_h = ov.allocated_height().max(TASKBAR_HEIGHT + h + 16);
+                let ov_h = ov.allocated_height().max(h + 16);
                 if let Some(ref anc) = *t.popup_anchor.borrow() {
                     if let Some((ax, ay)) = anc.translate_coordinates(ov, 0, 0) {
                         let aw = anc.allocated_width();
                         let x = (ax + aw - w).clamp(4, (ov_w - w - 4).max(4));
-                        let y = (ay - h - 2).clamp(4, (ov_h - TASKBAR_HEIGHT - h - 2).max(4));
+                        let y = (ay - h).clamp(4, (ov_h - h).max(4));
                         return Some(gdk::Rectangle::new(x, y, w, h));
                     }
                 }
-                Some(gdk::Rectangle::new(4, (ov_h - TASKBAR_HEIGHT - h - 2).max(4), w, h))
+                Some(gdk::Rectangle::new(4, (ov_h - h).max(4), w, h))
             });
         }
         {
@@ -377,7 +391,7 @@ impl SebTaskbar {
             });
         }
 
-        // Wire Browser ApplicationControl click (1 window -> focus immediately; >1 -> popup) + hover!
+        // Wire Browser ApplicationControl click (1 window -> focus immediately; >1 -> toggle popup) + hover!
         {
             let t = Rc::clone(&tb);
             browser_btn.connect_clicked(move |_| {
@@ -389,28 +403,57 @@ impl SebTaskbar {
                         (t.on_action)(TaskbarAction::FocusWindow(fid));
                     }
                 } else if len > 1 {
-                    t.show_windows_popup();
+                    if t.popup_layer.is_visible() && *t.popup_key.borrow() == "windows" {
+                        t.hide_popup();
+                    } else {
+                        t.show_windows_popup();
+                    }
                 }
             });
             browser_btn.add_events(gdk::EventMask::ENTER_NOTIFY_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
             let t_enter = Rc::clone(&tb);
             browser_btn.connect_enter_notify_event(move |_, _| {
                 t_enter.hover_hide_gen.set(t_enter.hover_hide_gen.get().wrapping_add(1));
-                if t_enter.window_items.borrow().len() > 1 {
+                if t_enter.window_items.borrow().len() > 1
+                    && !(t_enter.popup_layer.is_visible()
+                        && *t_enter.popup_key.borrow() == "windows")
+                {
                     t_enter.show_windows_popup();
                 }
                 glib::Propagation::Proceed
             });
-            let t_leave = Rc::clone(&tb);
-            browser_btn.connect_leave_notify_event(move |_, _| {
-                let gen = t_leave.hover_hide_gen.get().wrapping_add(1);
-                t_leave.hover_hide_gen.set(gen);
-                let t2 = Rc::clone(&t_leave);
-                glib::timeout_add_local_once(Duration::from_millis(250), move || {
-                    if t2.hover_hide_gen.get() == gen && *t2.popup_key.borrow() == "windows" {
+            let schedule_hover_hide = {
+                let t_h = Rc::clone(&tb);
+                let btn_w: gtk::Widget = browser_btn.clone().upcast();
+                let card_w: gtk::Widget = popup_card.clone().upcast();
+                Rc::new(move || {
+                    let gen = t_h.hover_hide_gen.get().wrapping_add(1);
+                    t_h.hover_hide_gen.set(gen);
+                    let t2 = Rc::clone(&t_h);
+                    let bw = btn_w.clone();
+                    let cw = card_w.clone();
+                    glib::timeout_add_local(Duration::from_millis(220), move || {
+                        if t2.hover_hide_gen.get() != gen
+                            || !t2.popup_layer.is_visible()
+                            || *t2.popup_key.borrow() != "windows"
+                        {
+                            return glib::ControlFlow::Break;
+                        }
+                        if pointer_inside_widget(&bw, 0) || pointer_inside_widget(&cw, 8) {
+                            return glib::ControlFlow::Continue;
+                        }
                         t2.hide_popup();
-                    }
-                });
+                        glib::ControlFlow::Break
+                    });
+                })
+            };
+
+            let t_leave = Rc::clone(&schedule_hover_hide);
+            browser_btn.connect_leave_notify_event(move |_, ev| {
+                if ev.detail() == gdk::NotifyType::Inferior {
+                    return glib::Propagation::Proceed;
+                }
+                t_leave();
                 glib::Propagation::Proceed
             });
             let t_pop_enter = Rc::clone(&tb);
@@ -418,19 +461,36 @@ impl SebTaskbar {
                 t_pop_enter.hover_hide_gen.set(t_pop_enter.hover_hide_gen.get().wrapping_add(1));
                 glib::Propagation::Proceed
             });
-            let t_pop_leave = Rc::clone(&tb);
-            popup_card.connect_leave_notify_event(move |_, _| {
-                if *t_pop_leave.popup_key.borrow() == "windows" {
-                    let gen = t_pop_leave.hover_hide_gen.get().wrapping_add(1);
-                    t_pop_leave.hover_hide_gen.set(gen);
-                    let t2 = Rc::clone(&t_pop_leave);
-                    glib::timeout_add_local_once(Duration::from_millis(250), move || {
-                        if t2.hover_hide_gen.get() == gen && *t2.popup_key.borrow() == "windows" {
-                            t2.hide_popup();
-                        }
-                    });
+            let t_pop_leave_tb = Rc::clone(&tb);
+            let t_pop_leave = Rc::clone(&schedule_hover_hide);
+            popup_card.connect_leave_notify_event(move |_, ev| {
+                if ev.detail() == gdk::NotifyType::Inferior {
+                    return glib::Propagation::Proceed;
+                }
+                if *t_pop_leave_tb.popup_key.borrow() == "windows" {
+                    t_pop_leave();
                 }
                 glib::Propagation::Proceed
+            });
+        }
+
+        // Wire Proctoring status popover
+        {
+            let t = Rc::clone(&tb);
+            tb.proctoring_btn.connect_clicked(move |anchor| {
+                let text = anchor
+                    .tooltip_text()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "Screen Proctoring: Active".to_string());
+                let w_ref: gtk::Widget = anchor.clone().upcast();
+                t.toggle_anchored_popup("proctoring", &w_ref, move |box_c| {
+                    let lbl = gtk::Label::new(Some(&text));
+                    lbl.set_margin_top(2);
+                    lbl.set_margin_bottom(2);
+                    lbl.set_margin_start(6);
+                    lbl.set_margin_end(6);
+                    box_c.pack_start(&lbl, false, false, 0);
+                });
             });
         }
 
@@ -473,6 +533,9 @@ impl SebTaskbar {
 
     pub fn remove_overlay(&self, window_overlay: &gtk::Overlay) {
         window_overlay.remove(&self.popup_layer);
+        unsafe {
+            self.popup_layer.destroy();
+        }
     }
 
     pub fn is_popup_visible(&self) -> bool {
@@ -640,7 +703,7 @@ impl SebTaskbar {
         *self.last_snapshot.borrow_mut() = snap.clone();
         self.refresh_clock();
 
-        // Battery (dynamic colored charge bar + lightning bolt!)
+        // Battery (dynamic colored charge bar + lightning bolt + low/critical visual state)
         let bat = &snap.battery;
         if bat.available {
             self.battery_btn.set_image(Some(&assets::dynamic_battery_image(
@@ -650,11 +713,22 @@ impl SebTaskbar {
                 self.low_thresh,
                 22,
             )));
-            let tip = if bat.charging {
-                format!("Charging: {}% {}", bat.percentage, bat.time_remaining)
+            let ratio = bat.percentage as f64 / 100.0;
+            let bctx = self.battery_btn.style_context();
+            bctx.remove_class("seb-battery-low");
+            bctx.remove_class("seb-battery-critical");
+            let state_prefix = if !bat.charging && ratio <= self.crit_thresh {
+                bctx.add_class("seb-battery-critical");
+                "Critical battery: "
+            } else if !bat.charging && ratio <= self.low_thresh {
+                bctx.add_class("seb-battery-low");
+                "Low battery: "
+            } else if bat.charging {
+                "Charging: "
             } else {
-                format!("Battery remaining: {}% {}", bat.percentage, bat.time_remaining)
+                "Battery remaining: "
             };
+            let tip = format!("{state_prefix}{}% {}", bat.percentage, bat.time_remaining);
             self.battery_btn.set_tooltip_text(Some(tip.trim()));
             self.battery_btn.show();
         } else {
@@ -759,44 +833,112 @@ impl SebTaskbar {
             let vb = gtk::Box::new(gtk::Orientation::Vertical, 8);
             vb.set_size_request(350, -1);
 
+            let hdr = gtk::Label::new(None);
+            hdr.set_markup(if raised {
+                "<b>Hand Raised</b>"
+            } else {
+                "<b>Raise Hand</b>"
+            });
+            hdr.set_xalign(0.0);
+            vb.pack_start(&hdr, false, false, 0);
+
             let entry = gtk::Entry::new();
             entry.style_context().add_class("seb-url-entry");
-            entry.set_placeholder_text(Some(if force_msg {
-                "Message required"
+            entry.set_placeholder_text(Some(if raised {
+                "Lower your hand first to send a new message"
+            } else if force_msg {
+                "Type message for invigilator (required)..."
             } else {
-                "Optional message"
+                "Type optional message for invigilator..."
             }));
             entry.set_sensitive(!raised);
             vb.pack_start(&entry, false, false, 0);
 
-            let action_btn = gtk::Button::with_label(if raised { "Lower Hand" } else { "Raise Hand" });
+            let action_btn = gtk::Button::with_label(if raised {
+                "Lower Hand"
+            } else {
+                "Send & Raise Hand"
+            });
             action_btn.style_context().add_class("seb-chrome-btn");
-            action_btn.set_size_request(150, 30);
+            action_btn.set_size_request(170, 30);
             action_btn.set_halign(gtk::Align::Center);
 
-            let t_c = Rc::clone(&t);
-            action_btn.connect_clicked(move |_| {
-                if raised {
-                    t_c.hide_popup();
-                    (t_c.on_action)(TaskbarAction::LowerHand);
-                } else {
-                    let text = entry.text().trim().to_string();
-                    if force_msg && text.is_empty() {
-                        dialogs::show_message(
-                            None,
-                            "Message Required",
-                            "Please enter a message before raising your hand.",
-                            false,
-                        );
-                        return;
+            let submit: Rc<dyn Fn()> = {
+                let t_c = Rc::clone(&t);
+                let e_c = entry.clone();
+                Rc::new(move || {
+                    if raised {
+                        t_c.hide_popup();
+                        (t_c.on_action)(TaskbarAction::LowerHand);
+                    } else {
+                        let text = e_c.text().trim().to_string();
+                        if force_msg && text.is_empty() {
+                            dialogs::show_message(
+                                None,
+                                "Message Required",
+                                "Please enter a message before raising your hand.",
+                                false,
+                            );
+                            return;
+                        }
+                        t_c.hide_popup();
+                        (t_c.on_action)(TaskbarAction::RaiseHand(text));
                     }
-                    t_c.hide_popup();
-                    (t_c.on_action)(TaskbarAction::RaiseHand(text));
-                }
-            });
+                })
+            };
+            {
+                let sub = Rc::clone(&submit);
+                action_btn.connect_clicked(move |_| sub());
+            }
+            {
+                let sub = Rc::clone(&submit);
+                entry.connect_activate(move |_| sub());
+            }
+            if !raised {
+                let e_focus = entry.clone();
+                glib::idle_add_local_once(move || {
+                    e_focus.grab_focus();
+                });
+            }
             vb.pack_start(&action_btn, false, false, 0);
             box_c.pack_start(&vb, false, false, 0);
         });
+    }
+
+    pub fn open_network_popup(self: &Rc<Self>, platform: &Rc<PlatformMonitor>) -> bool {
+        if let Some(ref btn) = self.network_btn {
+            self.show_network_popover(btn, platform);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn open_audio_popup(self: &Rc<Self>, platform: &Rc<PlatformMonitor>) -> bool {
+        if let Some(ref btn) = self.audio_btn {
+            self.show_audio_popover(btn, platform);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn open_battery_popup(self: &Rc<Self>) -> bool {
+        if self.battery_btn.is_visible() {
+            self.show_battery_popover(&self.battery_btn);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn open_keyboard_popup(self: &Rc<Self>, platform: &Rc<PlatformMonitor>) -> bool {
+        if let Some(ref btn) = self.keyboard_btn {
+            self.show_keyboard_popover(btn, platform);
+            true
+        } else {
+            false
+        }
     }
 
     fn show_battery_popover(self: &Rc<Self>, anchor: &gtk::Button) {
@@ -804,31 +946,29 @@ impl SebTaskbar {
         if !bat.available {
             return;
         }
-        let text = if bat.charging {
-            if bat.time_remaining.is_empty() {
-                format!("Charging: {}%", bat.percentage)
-            } else {
-                format!("Charging: {}% ({})", bat.percentage, bat.time_remaining)
-            }
-        } else if bat.time_remaining.is_empty() {
-            format!("Battery remaining: {}%", bat.percentage)
+        let ratio = bat.percentage as f64 / 100.0;
+        let prefix = if !bat.charging && ratio <= self.crit_thresh {
+            "Critical battery — connect charger: "
+        } else if !bat.charging && ratio <= self.low_thresh {
+            "Low battery: "
+        } else if bat.charging {
+            "Charging: "
         } else {
-            format!("Battery remaining: {}% ({})", bat.percentage, bat.time_remaining)
+            "Battery remaining: "
         };
-        let t = Rc::clone(self);
+        let text = if bat.time_remaining.is_empty() {
+            format!("{prefix}{}%", bat.percentage)
+        } else {
+            format!("{prefix}{}% ({})", bat.percentage, bat.time_remaining)
+        };
         let w_ref: gtk::Widget = anchor.clone().upcast();
         self.toggle_anchored_popup("battery", &w_ref, move |box_c| {
-            let hb = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let lbl = gtk::Label::new(Some(&text));
-            let close = gtk::Button::with_label("×");
-            close.style_context().add_class("seb-chrome-btn");
-            close.set_can_focus(false);
-            close.set_size_request(22, 22);
-            let t_c = Rc::clone(&t);
-            close.connect_clicked(move |_| t_c.hide_popup());
-            hb.pack_start(&lbl, true, true, 4);
-            hb.pack_end(&close, false, false, 0);
-            box_c.pack_start(&hb, false, false, 0);
+            lbl.set_margin_top(2);
+            lbl.set_margin_bottom(2);
+            lbl.set_margin_start(6);
+            lbl.set_margin_end(6);
+            box_c.pack_start(&lbl, false, false, 0);
         });
     }
 
@@ -1037,6 +1177,7 @@ impl SebTaskbar {
             let vb = gtk::Box::new(gtk::Orientation::Vertical, 4);
             vb.set_size_request(260, -1);
 
+            let hdr_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             let hdr = gtk::Label::new(Some(if st.kind == 1 {
                 "Wired Connection Active"
             } else if st.networks.is_empty() {
@@ -1044,7 +1185,23 @@ impl SebTaskbar {
             } else {
                 "Wi-Fi Networks"
             }));
-            vb.pack_start(&hdr, false, false, 2);
+            hdr.set_xalign(0.0);
+            hdr_row.pack_start(&hdr, true, true, 2);
+            let refresh_btn = gtk::Button::with_label("↻");
+            refresh_btn.style_context().add_class("seb-chrome-btn");
+            refresh_btn.set_can_focus(false);
+            refresh_btn.set_tooltip_text(Some("Refresh Wi-Fi list"));
+            {
+                let t_r = Rc::clone(&t);
+                let p_r = Rc::clone(&plat);
+                let anchor_c = anchor.clone();
+                refresh_btn.connect_clicked(move |_| {
+                    t_r.hide_popup();
+                    t_r.show_network_popover(&anchor_c, &p_r);
+                });
+            }
+            hdr_row.pack_end(&refresh_btn, false, false, 0);
+            vb.pack_start(&hdr_row, false, false, 2);
 
             if !st.networks.is_empty() {
                 let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
@@ -1054,6 +1211,17 @@ impl SebTaskbar {
                 let list_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
                 for net in &st.networks {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                    let sig_svg = if net.signal_percent > 66 {
+                        assets::ICON_WIFI_100_SVG
+                    } else if net.signal_percent > 33 {
+                        assets::ICON_WIFI_66_SVG
+                    } else if net.signal_percent > 0 {
+                        assets::ICON_WIFI_33_SVG
+                    } else {
+                        assets::ICON_WIFI_0_SVG
+                    };
+                    row.pack_start(&assets::image_from_bytes(sig_svg, 16, 16), false, false, 0);
                     let prefix = if net.active {
                         "✓ "
                     } else if net.saved {
@@ -1063,7 +1231,12 @@ impl SebTaskbar {
                     };
                     let sec_tag = if net.secured { "" } else { " (Open)" };
                     let label = format!("{prefix}{}{sec_tag} ({}%)", net.ssid, net.signal_percent);
-                    let btn = gtk::Button::with_label(&label);
+                    let lbl = gtk::Label::new(Some(&label));
+                    lbl.set_xalign(0.0);
+                    row.pack_start(&lbl, true, true, 0);
+
+                    let btn = gtk::Button::new();
+                    btn.add(&row);
                     btn.style_context().add_class("seb-ac-win-row");
                     btn.set_can_focus(false);
                     let ssid = net.ssid.clone();
@@ -1100,6 +1273,27 @@ impl SebTaskbar {
             box_c.pack_start(&vb, false, false, 0);
         });
     }
+}
+
+fn pointer_inside_widget(w: &gtk::Widget, pad_bottom: i32) -> bool {
+    let Some(toplevel) = w.toplevel() else {
+        return false;
+    };
+    let Some(gdk_win) = toplevel.window() else {
+        return false;
+    };
+    let Some(seat) = gdk_win.display().default_seat() else {
+        return false;
+    };
+    let Some(ptr) = seat.pointer() else {
+        return false;
+    };
+    let (_, px, py, _) = gdk_win.device_position(&ptr);
+    let Some((wx, wy)) = w.translate_coordinates(&toplevel, 0, 0) else {
+        return false;
+    };
+    let alloc = w.allocation();
+    px >= wx && px <= wx + alloc.width() && py >= wy && py <= wy + alloc.height() + pad_bottom
 }
 
 pub fn audio_svg_for(st: &seb_platform::AudioState) -> &'static [u8] {

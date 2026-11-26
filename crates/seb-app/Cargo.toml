@@ -30,6 +30,7 @@ seb-security = { path = "../seb-security" }
 seb-server = { path = "../seb-server" }
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url.workspace = true
 webkit2gtk = { version = "2.0", features = ["v2_38"] }
 x11rb = "0.14"

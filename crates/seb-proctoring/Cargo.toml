@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 base64.workspace = true
 image.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url.workspace = true

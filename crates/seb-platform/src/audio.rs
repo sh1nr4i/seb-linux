@@ -222,11 +222,11 @@ pub fn set_audio_muted(muted: bool) {
     if pa_set_muted(muted) {
         return;
     }
-    if !run_cmd(
-        "wpctl",
-        &["set-mute", "@DEFAULT_AUDIO_SINK@", if muted { "1" } else { "0" }],
-    )
-    .is_empty()
+    if ProcessCommand::new("wpctl")
+        .args(["set-mute", "@DEFAULT_AUDIO_SINK@", if muted { "1" } else { "0" }])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
     {
         return;
     }

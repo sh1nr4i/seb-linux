@@ -1,11 +1,16 @@
 pub mod client;
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use image::codecs::bmp::BmpEncoder;
+use image::codecs::gif::GifEncoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::{ColorType, DynamicImage, ImageEncoder, RgbaImage};
+use image::{ColorType, DynamicImage, Frame, ImageEncoder, RgbaImage};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const MAX_METADATA_BYTES: usize = 4000;
 
@@ -61,11 +66,14 @@ pub fn process_and_encode_rgba(
     quantization: ImageQuantizationKind,
     format: ImageFormatKind,
 ) -> Option<EncodedScreenshot> {
-    if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if expected == 0 || rgba.len() < expected {
         return None;
     }
 
-    let img = RgbaImage::from_raw(width, height, rgba[..(width * height * 4) as usize].to_vec())?;
+    let img = RgbaImage::from_raw(width, height, rgba[..expected].to_vec())?;
     let mut dyn_img = DynamicImage::ImageRgba8(img);
 
     if downscaling > 1.0 {
@@ -137,7 +145,30 @@ pub fn process_and_encode_rgba(
             enc.encode(&raw_pixels, w, h, color_type.into()).ok()?;
             "bmp".to_string()
         }
-        ImageFormatKind::Png | ImageFormatKind::Gif => {
+        ImageFormatKind::Gif => {
+            let cap = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+            let rgba_buf = match color_type {
+                ColorType::L8 => {
+                    let mut v = Vec::with_capacity(cap);
+                    for &g in &raw_pixels {
+                        v.extend_from_slice(&[g, g, g, 255]);
+                    }
+                    RgbaImage::from_raw(w, h, v)?
+                }
+                _ => {
+                    let mut v = Vec::with_capacity(cap);
+                    for chunk in raw_pixels.chunks_exact(3) {
+                        v.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+                    }
+                    RgbaImage::from_raw(w, h, v)?
+                }
+            };
+            let mut enc = GifEncoder::new(&mut out);
+            enc.encode_frame(Frame::new(rgba_buf)).ok()?;
+            drop(enc);
+            "gif".to_string()
+        }
+        ImageFormatKind::Png => {
             let enc = PngEncoder::new(&mut out);
             enc.write_image(&raw_pixels, w, h, color_type.into()).ok()?;
             "png".to_string()
@@ -148,6 +179,54 @@ pub fn process_and_encode_rgba(
         format_name,
         bytes: out,
     })
+}
+
+/// Encrypts a Screen Proctoring cache payload with AES-GCM (128-bit if secret is 16 bytes,
+/// otherwise 256-bit via SHA-256 key derivation). Format: `[12-byte nonce][ciphertext+tag]`.
+pub fn encrypt_cache_bytes(secret: &str, plaintext: &[u8]) -> Option<Vec<u8>> {
+    let raw = secret.as_bytes();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = if raw.len() == 16 {
+        let cipher = Aes128Gcm::new_from_slice(raw).ok()?;
+        cipher.encrypt(nonce, plaintext).ok()?
+    } else if raw.len() == 32 {
+        let cipher = Aes256Gcm::new_from_slice(raw).ok()?;
+        cipher.encrypt(nonce, plaintext).ok()?
+    } else {
+        let derived = Sha256::digest(raw);
+        let cipher = Aes256Gcm::new_from_slice(&derived).ok()?;
+        cipher.encrypt(nonce, plaintext).ok()?
+    };
+    let mut out = Vec::with_capacity(12 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Some(out)
+}
+
+/// Decrypts a Screen Proctoring cache payload previously encrypted by `encrypt_cache_bytes`.
+pub fn decrypt_cache_bytes(secret: &str, data: &[u8]) -> Option<Vec<u8>> {
+    let raw = secret.as_bytes();
+    if raw.is_empty() || data.len() <= 12 {
+        return None;
+    }
+    let nonce = Nonce::from_slice(&data[..12]);
+    let ciphertext = &data[12..];
+    if raw.len() == 16 {
+        let cipher = Aes128Gcm::new_from_slice(raw).ok()?;
+        cipher.decrypt(nonce, ciphertext).ok()
+    } else if raw.len() == 32 {
+        let cipher = Aes256Gcm::new_from_slice(raw).ok()?;
+        cipher.decrypt(nonce, ciphertext).ok()
+    } else {
+        let derived = Sha256::digest(raw);
+        let cipher = Aes256Gcm::new_from_slice(&derived).ok()?;
+        cipher.decrypt(nonce, ciphertext).ok()
+    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -246,7 +325,18 @@ pub fn build_metadata_json(input: &MetadataInput) -> Vec<u8> {
     browser_url = truncate_chars(&browser_url, 256);
     browser_info = truncate_chars(&browser_info, 128);
     window_title = truncate_chars(&window_title, 128);
-    serialize(&executable, &browser_info, &browser_url, &user_action, &window_title)
+    let mut encoded = serialize(&executable, &browser_info, &browser_url, &user_action, &window_title);
+    let mut limit = 128usize;
+    while encoded.len() > MAX_METADATA_BYTES && limit > 8 {
+        limit /= 2;
+        browser_url = truncate_chars(&browser_url, limit);
+        browser_info = truncate_chars(&browser_info, limit);
+        window_title = truncate_chars(&window_title, limit);
+        user_action = truncate_chars(&user_action, limit);
+        executable = truncate_chars(&executable, limit);
+        encoded = serialize(&executable, &browser_info, &browser_url, &user_action, &window_title);
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -279,6 +369,34 @@ mod tests {
         .unwrap();
         assert_eq!(jpg.format_name, "jpg");
         assert!(jpg.bytes.starts_with(&[0xff, 0xd8]));
+
+        let gif = process_and_encode_rgba(
+            &rgba,
+            64,
+            64,
+            2.0,
+            ImageQuantizationKind::Color8bpp,
+            ImageFormatKind::Gif,
+        )
+        .unwrap();
+        assert_eq!(gif.format_name, "gif");
+        assert!(gif.bytes.starts_with(b"GIF8"));
+    }
+
+    #[test]
+    fn aes_gcm_cache_roundtrip_and_tamper_rejection() {
+        let payload = b"screen-proctoring-frame-payload";
+        let secret = "0123456789abcdef";
+        let enc = encrypt_cache_bytes(secret, payload).unwrap();
+        assert_ne!(&enc[12..], payload);
+        let dec = decrypt_cache_bytes(secret, &enc).unwrap();
+        assert_eq!(dec, payload);
+
+        let mut tampered = enc.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xff;
+        assert!(decrypt_cache_bytes(secret, &tampered).is_none());
+        assert!(decrypt_cache_bytes("wrong-secret-key", &enc).is_none());
     }
 
     #[test]
@@ -297,5 +415,34 @@ mod tests {
         assert!(bytes.len() <= MAX_METADATA_BYTES);
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(parsed.is_object());
+    }
+
+    #[test]
+    fn metadata_with_multibyte_utf8_and_overflow_rgba_dimensions_are_safe() {
+        let input = MetadataInput {
+            capture_application_data: true,
+            capture_browser_data: true,
+            capture_window_title: true,
+            app_name: "Safe Exam Browser".into(),
+            is_main_window: true,
+            window_title: "🔒".repeat(1500),
+            browser_url: format!("https://example.org/{}", "😀".repeat(1500)),
+            trigger_action: "Click".into(),
+        };
+        let bytes = build_metadata_json(&input);
+        assert!(bytes.len() <= MAX_METADATA_BYTES);
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed.is_object());
+
+        // Overflowing dimensions must return None cleanly instead of panicking
+        let res = process_and_encode_rgba(
+            &[0u8; 16],
+            u32::MAX,
+            u32::MAX,
+            1.0,
+            ImageQuantizationKind::Color24bpp,
+            ImageFormatKind::Png,
+        );
+        assert!(res.is_none());
     }
 }

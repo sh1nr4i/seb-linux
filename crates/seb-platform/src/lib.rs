@@ -1191,7 +1191,7 @@ fn connect_wifi_dbus_nm(ssid: &str, password: Option<&str>) -> Result<(), String
         .find(|(s, _)| s == ssid)
         .map(|(_, path)| path);
 
-    let clean_pw = password.map(str::trim).filter(|p| !p.is_empty());
+    let clean_pw = password.filter(|p| !p.is_empty());
 
     if let Some(saved_path) = saved {
         if let Some(pw) = clean_pw {
@@ -1301,7 +1301,7 @@ pub fn connect_wifi(ssid: &str, password: Option<&str>) -> Result<(), String> {
                 // Retry once via `nmcli` CLI only if D-Bus wasn't an auth failure
                 if !nm_err.contains("Authentication failed") {
                     let mut args = vec!["device", "wifi", "connect", ssid];
-                    if let Some(pw) = password.map(str::trim).filter(|p| !p.is_empty()) {
+                    if let Some(pw) = password.filter(|p| !p.is_empty()) {
                         args.push("password");
                         args.push(pw);
                     }

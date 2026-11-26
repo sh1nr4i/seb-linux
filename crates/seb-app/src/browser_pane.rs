@@ -26,8 +26,8 @@ pub const TITLE_BAR_HEIGHT: i32 = 26;
 pub const RESIZE_BORDER: i32 = 6;
 pub const MIN_WINDOW_WIDTH: i32 = 360;
 pub const MIN_WINDOW_HEIGHT: i32 = 240;
-pub const SNAP_EDGE_THRESHOLD: i32 = 18;
-pub const SNAP_CORNER_THRESHOLD: i32 = 64;
+pub const SNAP_EDGE_THRESHOLD: i32 = 2;
+pub const SNAP_CORNER_THRESHOLD: i32 = 48;
 const DRAG_START_THRESHOLD: i32 = 6;
 
 const RESIZE_LEFT: u8 = 1 << 0;
@@ -67,6 +67,9 @@ pub enum PaneAction {
     SnapPreview(Option<PaneRect>),
     UserInteraction(String),
     BroadcastClipboard { id: String, b64: String },
+    LmsUserIdentifierDetected(String),
+    PageLoaded { url: String },
+    OpenPdfInline { pane_id: u64, url: String },
     Log(String),
 }
 
@@ -76,6 +79,7 @@ pub struct BrowserPane {
     pub root: gtk::EventBox,
     overlay: gtk::Overlay,
     frame_box: gtk::Box,
+    title_event_box: gtk::EventBox,
     pub web_view: WebView,
     max_btn: gtk::Button,
     back_btn: Option<gtk::Button>,
@@ -90,11 +94,13 @@ pub struct BrowserPane {
     pub maximized: Cell<bool>,
     pub snapped: Cell<bool>,
     pub minimized: Cell<bool>,
+    floating_proctoring: Cell<bool>,
     pub restored_rect: RefCell<PaneRect>,
     pub current_rect: RefCell<PaneRect>,
     last_requested_size: Cell<(i32, i32)>,
     pub current_title: RefCell<String>,
     pub current_url: RefCell<String>,
+    current_favicon: RefCell<Option<gdk_pixbuf::Pixbuf>>,
     zoom_percent: Cell<i32>,
     reload_confirm_active: Cell<bool>,
     last_preview: RefCell<Option<gdk_pixbuf::Pixbuf>>,
@@ -358,23 +364,39 @@ impl BrowserPane {
         // Floating Find & Zoom overlay cards matching C++ `BrowserWindow::toggleFindPopup` /
         // `toggleZoomPopup` (pure sharp rectangular #f0f0f0 cards with 1px gray border, zero GTK arrow tips!).
         let find_overlay = gtk::EventBox::new();
-        find_overlay.set_visible_window(true);
-        find_overlay.style_context().add_class("seb-popup");
-        find_overlay.style_context().add_class("seb-frame-popup");
-        find_overlay.style_context().add_class("seb-find-popup");
+        find_overlay.set_visible_window(false);
         find_overlay.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
         let find_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        find_row.style_context().add_class("seb-popup");
+        find_row.style_context().add_class("seb-frame-popup");
+        find_row.style_context().add_class("seb-find-popup");
         let find_entry = gtk::Entry::new();
         find_entry.style_context().add_class("seb-url-entry");
         find_entry.set_placeholder_text(Some("Find"));
         find_entry.set_size_request(210, 30);
         find_entry.set_valign(gtk::Align::Center);
         block_middle_entry(&find_entry);
+        let find_prev = gtk::Button::with_label("▲");
+        find_prev.style_context().add_class("seb-chrome-btn");
+        find_prev.set_can_focus(false);
+        find_prev.set_size_request(28, 30);
+        find_prev.set_tooltip_text(Some("Previous match"));
+        let find_next = gtk::Button::with_label("▼");
+        find_next.style_context().add_class("seb-chrome-btn");
+        find_next.set_can_focus(false);
+        find_next.set_size_request(28, 30);
+        find_next.set_tooltip_text(Some("Next match"));
+        let find_case = gtk::CheckButton::with_label("Aa");
+        find_case.set_can_focus(false);
+        find_case.set_tooltip_text(Some("Match case (Case Sensitive)"));
         let find_close = gtk::Button::with_label("×");
         find_close.style_context().add_class("seb-chrome-btn");
         find_close.set_can_focus(false);
         find_close.set_size_request(30, 30);
         find_row.pack_start(&find_entry, false, false, 0);
+        find_row.pack_start(&find_prev, false, false, 0);
+        find_row.pack_start(&find_next, false, false, 0);
+        find_row.pack_start(&find_case, false, false, 2);
         find_row.pack_start(&find_close, false, false, 0);
         find_overlay.add(&find_row);
         find_overlay.show_all();
@@ -382,11 +404,11 @@ impl BrowserPane {
         find_overlay.hide();
 
         let zoom_overlay = gtk::EventBox::new();
-        zoom_overlay.set_visible_window(true);
-        zoom_overlay.style_context().add_class("seb-popup");
-        zoom_overlay.style_context().add_class("seb-frame-popup");
+        zoom_overlay.set_visible_window(false);
         zoom_overlay.add_events(gdk::EventMask::BUTTON_PRESS_MASK);
-        let zoom_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let zoom_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        zoom_row.style_context().add_class("seb-popup");
+        zoom_row.style_context().add_class("seb-frame-popup");
         let zoom_minus = gtk::Button::with_label("−");
         zoom_minus.style_context().add_class("seb-chrome-btn");
         zoom_minus.set_can_focus(false);
@@ -668,6 +690,7 @@ impl BrowserPane {
             root: root.clone(),
             overlay: overlay.clone(),
             frame_box: frame_box.clone(),
+            title_event_box: title_event_box.clone(),
             web_view: web_view.clone(),
             max_btn: max_btn.clone(),
             back_btn: back_btn_opt.clone(),
@@ -682,6 +705,7 @@ impl BrowserPane {
             maximized: Cell::new(is_main),
             snapped: Cell::new(false),
             minimized: Cell::new(false),
+            floating_proctoring: Cell::new(false),
             restored_rect: RefCell::new(PaneRect {
                 x: 40,
                 y: 30,
@@ -697,6 +721,7 @@ impl BrowserPane {
             last_requested_size: Cell::new((0, 0)),
             current_title: RefCell::new("Safe Exam Browser".to_string()),
             current_url: RefCell::new(initial_url.to_string()),
+            current_favicon: RefCell::new(None),
             zoom_percent: Cell::new(100),
             reload_confirm_active: Cell::new(false),
             last_preview: RefCell::new(None),
@@ -762,19 +787,49 @@ impl BrowserPane {
             btn.connect_clicked(move |_| p.toggle_find_bar());
         }
 
-        // Find popup wiring (live search, Enter -> next, Esc / close -> close & clear)
+        // Find popup wiring (live search, Case Sensitive toggle, Prev/Next, Enter -> next, Esc / close -> close & clear)
         {
-            let wv = web_view.clone();
-            find_entry.connect_changed(move |e| {
-                if let Some(fc) = wv.find_controller() {
-                    let text = e.text();
-                    if text.is_empty() {
-                        fc.search_finish();
-                    } else {
-                        fc.search(text.as_str(), 1, u32::MAX);
+            let run_search = {
+                let wv = web_view.clone();
+                let entry = find_entry.clone();
+                let case_cb = find_case.clone();
+                Rc::new(move || {
+                    if let Some(fc) = wv.find_controller() {
+                        let text = entry.text();
+                        if text.is_empty() {
+                            fc.search_finish();
+                        } else {
+                            // WebKitFindOptions: CASE_INSENSITIVE = 1 << 0, WRAP_AROUND = 1 << 4 (16)
+                            let opts: u32 = if case_cb.is_active() { 16 } else { 1 | 16 };
+                            fc.search(text.as_str(), opts, u32::MAX);
+                        }
                     }
-                }
-            });
+                })
+            };
+            {
+                let rs = Rc::clone(&run_search);
+                find_entry.connect_changed(move |_| rs());
+            }
+            {
+                let rs = Rc::clone(&run_search);
+                find_case.connect_toggled(move |_| rs());
+            }
+            {
+                let wv = web_view.clone();
+                find_prev.connect_clicked(move |_| {
+                    if let Some(fc) = wv.find_controller() {
+                        fc.search_previous();
+                    }
+                });
+            }
+            {
+                let wv = web_view.clone();
+                find_next.connect_clicked(move |_| {
+                    if let Some(fc) = wv.find_controller() {
+                        fc.search_next();
+                    }
+                });
+            }
             let wv = web_view.clone();
             find_entry.connect_activate(move |_| {
                 if let Some(fc) = wv.find_controller() {
@@ -876,81 +931,91 @@ impl BrowserPane {
             let ws_move = ws.clone();
             let act_move = Rc::clone(&act);
             title_event_box.connect_motion_notify_event(move |_, ev| {
-                let mut st = d_move.borrow_mut();
-                if !st.active {
-                    return glib::Propagation::Proceed;
-                }
                 let (rx, ry, mask_opt) =
                     workspace_pointer(&ws_move, ev.device().as_ref(), ev.root());
                 let btn_down = ev.state().contains(gdk::ModifierType::BUTTON1_MASK)
                     || mask_opt.is_some_and(|m| m.contains(gdk::ModifierType::BUTTON1_MASK));
-                if !btn_down {
-                    if st.dragging {
-                        st.last_drag_finished = Some(std::time::Instant::now());
-                    }
-                    st.active = false;
-                    st.dragging = false;
-                    st.snap = None;
-                    act_move(PaneAction::SnapPreview(None));
-                    return glib::Propagation::Proceed;
-                }
-                let dx = (rx - st.start_rx) as i32;
-                let dy = (ry - st.start_ry) as i32;
-                if !st.dragging && dx.abs() < DRAG_START_THRESHOLD && dy.abs() < DRAG_START_THRESHOLD {
-                    return glib::Propagation::Stop;
-                }
-                st.dragging = true;
-
                 let ws_w = ws_move.allocated_width().max(MIN_WINDOW_WIDTH);
                 let ws_h = ws_move.allocated_height().max(MIN_WINDOW_HEIGHT);
 
-                // Unmaximize/unsnap with proportional horizontal grab ratio
-                if p_move.maximized.get() || p_move.snapped.get() {
-                    let cur_rect = *p_move.current_rect.borrow();
-                    let cur_w = cur_rect.w.max(1) as f64;
-                    let ratio = (st.local_x / cur_w).clamp(0.1, 0.9);
-                    let mut restored = *p_move.restored_rect.borrow();
-                    if restored.w < MIN_WINDOW_WIDTH || restored.w >= ws_w {
-                        restored.w = (ws_w * 80 / 100).max(480).min(ws_w);
-                        restored.h = (ws_h * 80 / 100).max(360).min(ws_h);
+                let (unmax_rect, move_rect, zone_opt) = {
+                    let mut st = d_move.borrow_mut();
+                    if !st.active {
+                        return glib::Propagation::Proceed;
                     }
-                    let new_x = (rx as i32 - (restored.w as f64 * ratio) as i32)
-                        .clamp(-restored.w + 80, ws_w - 80);
-                    let new_y = cur_rect.y.clamp(0, (ws_h - TITLE_BAR_HEIGHT).max(0));
-                    st.orig_x = new_x;
-                    st.orig_y = new_y;
-                    st.start_rx = rx;
-                    st.start_ry = ry;
-                    p_move.set_windowed_rect(
-                        &ws_move,
-                        PaneRect {
+                    if !btn_down {
+                        if st.dragging {
+                            st.last_drag_finished = Some(std::time::Instant::now());
+                        }
+                        st.active = false;
+                        st.dragging = false;
+                        st.snap = None;
+                        drop(st);
+                        act_move(PaneAction::SnapPreview(None));
+                        return glib::Propagation::Proceed;
+                    }
+                    let dx = (rx - st.start_rx) as i32;
+                    let dy = (ry - st.start_ry) as i32;
+                    if !st.dragging
+                        && dx.abs() < DRAG_START_THRESHOLD
+                        && dy.abs() < DRAG_START_THRESHOLD
+                    {
+                        return glib::Propagation::Stop;
+                    }
+                    st.dragging = true;
+
+                    // Unmaximize/unsnap with proportional horizontal grab ratio
+                    let mut unmax_rect = None;
+                    let cur_w_for_clamp = if p_move.maximized.get() || p_move.snapped.get() {
+                        let cur_rect = *p_move.current_rect.borrow();
+                        let cur_w = cur_rect.w.max(1) as f64;
+                        let ratio = (st.local_x / cur_w).clamp(0.1, 0.9);
+                        let mut restored = *p_move.restored_rect.borrow();
+                        if restored.w < MIN_WINDOW_WIDTH || restored.w >= ws_w {
+                            restored.w = (ws_w * 80 / 100).max(480).min(ws_w);
+                            restored.h = (ws_h * 80 / 100).max(360).min(ws_h);
+                        }
+                        let new_x = (rx as i32 - (restored.w as f64 * ratio) as i32)
+                            .clamp(-restored.w + 80, ws_w - 80);
+                        let new_y = cur_rect.y.clamp(0, (ws_h - TITLE_BAR_HEIGHT).max(0));
+                        st.orig_x = new_x;
+                        st.orig_y = new_y;
+                        st.start_rx = rx;
+                        st.start_ry = ry;
+                        let r = PaneRect {
                             x: new_x,
                             y: new_y,
                             w: restored.w,
                             h: restored.h,
-                        },
-                        false,
-                    );
-                }
+                        };
+                        unmax_rect = Some(r);
+                        (r.w, r.h)
+                    } else {
+                        let cur = *p_move.current_rect.borrow();
+                        (cur.w, cur.h)
+                    };
 
-                let cur = *p_move.current_rect.borrow();
-                let nx = (st.orig_x + (rx - st.start_rx) as i32).clamp(-cur.w + 80, ws_w - 80);
-                let ny = (st.orig_y + (ry - st.start_ry) as i32)
-                    .clamp(0, (ws_h - TITLE_BAR_HEIGHT).max(0));
-                p_move.set_windowed_rect(
-                    &ws_move,
-                    PaneRect {
+                    let nx = (st.orig_x + (rx - st.start_rx) as i32)
+                        .clamp(-cur_w_for_clamp.0 + 80, ws_w - 80);
+                    let ny = (st.orig_y + (ry - st.start_ry) as i32)
+                        .clamp(0, (ws_h - TITLE_BAR_HEIGHT).max(0));
+                    let move_rect = PaneRect {
                         x: nx,
                         y: ny,
-                        w: cur.w,
-                        h: cur.h,
-                    },
-                    false,
-                );
+                        w: cur_w_for_clamp.0,
+                        h: cur_w_for_clamp.1,
+                    };
 
-                let zone = detect_snap_zone(rx as i32, ry as i32, ws_w, ws_h);
-                st.snap = Some(zone);
-                act_move(PaneAction::SnapPreview(snap_rect_for_zone(zone, ws_w, ws_h)));
+                    let zone = detect_snap_zone(rx as i32, ry as i32, ws_w, ws_h);
+                    st.snap = Some(zone);
+                    (unmax_rect, move_rect, snap_rect_for_zone(zone, ws_w, ws_h))
+                };
+
+                if let Some(r) = unmax_rect {
+                    p_move.set_windowed_rect(&ws_move, r, false);
+                }
+                p_move.set_windowed_rect(&ws_move, move_rect, false);
+                act_move(PaneAction::SnapPreview(zone_opt));
                 glib::Propagation::Stop
             });
 
@@ -959,15 +1024,22 @@ impl BrowserPane {
             let ws_rel = ws.clone();
             let act_rel = Rc::clone(&act);
             title_event_box.connect_button_release_event(move |_, _| {
-                let mut st = d_rel.borrow_mut();
-                if st.active {
-                    let was_dragging = st.dragging;
-                    let snap = st.snap.take().unwrap_or(SnapZone::None);
-                    st.active = false;
-                    st.dragging = false;
-                    if was_dragging {
-                        st.last_drag_finished = Some(std::time::Instant::now());
+                let snap_opt = {
+                    let mut st = d_rel.borrow_mut();
+                    if st.active {
+                        let was_dragging = st.dragging;
+                        let snap = st.snap.take().unwrap_or(SnapZone::None);
+                        st.active = false;
+                        st.dragging = false;
+                        if was_dragging {
+                            st.last_drag_finished = Some(std::time::Instant::now());
+                        }
+                        Some(snap)
+                    } else {
+                        None
                     }
+                };
+                if let Some(snap) = snap_opt {
                     act_rel(PaneAction::SnapPreview(None));
                     let ws_w = ws_rel.allocated_width().max(MIN_WINDOW_WIDTH);
                     let ws_h = ws_rel.allocated_height().max(MIN_WINDOW_HEIGHT);
@@ -987,13 +1059,15 @@ impl BrowserPane {
             let d_brk = Rc::clone(&drag);
             let act_brk = Rc::clone(&act);
             title_event_box.connect_grab_broken_event(move |_, _| {
-                let mut st = d_brk.borrow_mut();
-                if st.dragging {
-                    st.last_drag_finished = Some(std::time::Instant::now());
+                {
+                    let mut st = d_brk.borrow_mut();
+                    if st.dragging {
+                        st.last_drag_finished = Some(std::time::Instant::now());
+                    }
+                    st.active = false;
+                    st.dragging = false;
+                    st.snap = None;
                 }
-                st.active = false;
-                st.dragging = false;
-                st.snap = None;
                 act_brk(PaneAction::SnapPreview(None));
                 glib::Propagation::Proceed
             });
@@ -1045,6 +1119,17 @@ impl BrowserPane {
                 act(PaneAction::TitleOrUrlChanged { id, title });
             });
         }
+        // Track webpage favicon for Action Center sidebar & Alt+Tab switcher cards
+        {
+            let p = Rc::clone(&pane);
+            let act = Rc::clone(&on_action);
+            web_view.connect_favicon_notify(move |wv| {
+                let pb = wv.favicon().and_then(surface_to_pixbuf);
+                *p.current_favicon.borrow_mut() = pb;
+                let title = p.current_title.borrow().clone();
+                act(PaneAction::TitleOrUrlChanged { id, title });
+            });
+        }
 
         // Unified 2px #2196F3 page-loading progress bar wiring
         {
@@ -1063,6 +1148,8 @@ impl BrowserPane {
                 let gen_c = Rc::clone(&load_gen);
                 let pb = load_progress.clone();
                 let frac_c = Rc::clone(&load_fraction);
+                let p_snap = Rc::clone(&pane);
+                let act_load = Rc::clone(&on_action);
                 web_view.connect_load_changed(move |wv, ev| match ev {
                     webkit2gtk::LoadEvent::Started
                     | webkit2gtk::LoadEvent::Redirected
@@ -1084,6 +1171,19 @@ impl BrowserPane {
                                     frac_hide.set(0.0);
                                     pb_hide.hide();
                                 }
+                            },
+                        );
+                        if let Some(uri) = wv.uri() {
+                            act_load(PaneAction::PageLoaded {
+                                url: uri.to_string(),
+                            });
+                        }
+                        // Pre-cache live WebView snapshot shortly after page finishes painting
+                        let p_c = Rc::clone(&p_snap);
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(250),
+                            move || {
+                                p_c.refresh_preview_async(202, 112, None);
                             },
                         );
                     }
@@ -1200,6 +1300,17 @@ impl BrowserPane {
                                     .suggested_filename()
                                     .map(|s| s.to_string())
                                     .unwrap_or_default();
+                                // Detect Generic LMS user identifier header (X-LMS-USER-ID) for SEB Server
+                                if let Some(headers) = resp.http_headers() {
+                                    if let Some(uid) = headers.one("X-LMS-USER-ID") {
+                                        let trimmed = uid.trim();
+                                        if !trimmed.is_empty() {
+                                            act(PaneAction::LmsUserIdentifierDetected(
+                                                trimmed.to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
                                 if allow_reconfig && is_configuration_resource(&uri, &suggested, &mime) {
                                     // Download via WebKitGTK so browser session cookies (e.g. MoodleSession) are included!
                                     decision.download();
@@ -1208,9 +1319,19 @@ impl BrowserPane {
                                     )));
                                     return true;
                                 }
-                                if !allow_pdf && mime.eq_ignore_ascii_case("application/pdf") {
-                                    decision.download();
-                                    return true;
+                                if mime.eq_ignore_ascii_case("application/pdf") {
+                                    if !allow_pdf {
+                                        decision.download();
+                                        return true;
+                                    }
+                                    if !resp_dec.is_mime_type_supported() {
+                                        decision.ignore();
+                                        act(PaneAction::OpenPdfInline {
+                                            pane_id: id,
+                                            url: uri,
+                                        });
+                                        return true;
+                                    }
                                 }
                             }
                         }
@@ -1222,10 +1343,11 @@ impl BrowserPane {
                                 if let Some(req) = action.request() {
                                     if let Some(uri_gstr) = req.uri() {
                                         let uri = uri_gstr.to_string();
+                                        let cur_url = p_pol.current_url.borrow().clone();
                                         decision.ignore();
                                         handle_popup_request(
                                             wv,
-                                            &p_pol.current_url.borrow(),
+                                            &cur_url,
                                             &uri,
                                             popup_policy,
                                             &filter,
@@ -1268,9 +1390,10 @@ impl BrowserPane {
                     .map(|u| u.to_string())
                     .unwrap_or_default();
                 if !uri.is_empty() {
+                    let cur_url = p.current_url.borrow().clone();
                     handle_popup_request(
                         wv,
-                        &p.current_url.borrow(),
+                        &cur_url,
                         &uri,
                         popup_policy,
                         &filter,
@@ -1295,10 +1418,18 @@ impl BrowserPane {
             });
         }
 
-        // Printing enforcement (`window.print()` blocked when !allow_print)
+        // Printing enforcement (`window.print()` blocked when !allow_print; guarded by external modal when allowed)
         {
             let allow_print = settings.browser.allow_print;
-            web_view.connect_print(move |_, _| !allow_print);
+            let win_c = parent_window.clone();
+            web_view.connect_print(move |_, op| {
+                if allow_print {
+                    dialogs::with_external_modal(|| {
+                        op.run_dialog(Some(&win_c));
+                    });
+                }
+                true
+            });
         }
 
         // Themed modal JS dialogs (alert / confirm / prompt / beforeunload) with keep_above!
@@ -1637,17 +1768,31 @@ impl BrowserPane {
                 let rs = Rc::clone(&rstate);
                 let p = Rc::clone(self);
                 let ws = workspace.clone();
-                strip.connect_motion_notify_event(move |_, ev| {
-                    let st = rs.borrow();
-                    if !st.active {
+                strip.connect_motion_notify_event(move |w, ev| {
+                    if !ev.state().contains(gdk::ModifierType::BUTTON1_MASK) {
+                        let mut st = rs.borrow_mut();
+                        if st.active {
+                            st.active = false;
+                            st.orig = None;
+                            if let Some(win) = w.window() {
+                                win.set_cursor(None);
+                            }
+                        }
                         return glib::Propagation::Proceed;
                     }
-                    let Some(orig) = st.orig else {
+                    let (active, orig_opt, start_rx, start_ry, edges) = {
+                        let st = rs.borrow();
+                        (st.active, st.orig, st.start_rx, st.start_ry, st.edges)
+                    };
+                    if !active {
+                        return glib::Propagation::Proceed;
+                    }
+                    let Some(orig) = orig_opt else {
                         return glib::Propagation::Proceed;
                     };
                     let (rx, ry, _) = workspace_pointer(&ws, ev.device().as_ref(), ev.root());
-                    let dx = (rx - st.start_rx) as i32;
-                    let dy = (ry - st.start_ry) as i32;
+                    let dx = (rx - start_rx) as i32;
+                    let dy = (ry - start_ry) as i32;
                     let ws_w = ws.allocated_width().max(MIN_WINDOW_WIDTH);
                     let ws_h = ws.allocated_height().max(MIN_WINDOW_HEIGHT);
 
@@ -1656,17 +1801,18 @@ impl BrowserPane {
                     let mut top = orig.y;
                     let mut bottom = orig.y + orig.h;
 
-                    if st.edges & RESIZE_LEFT != 0 {
-                        left = (orig.x + dx).clamp(0, right - MIN_WINDOW_WIDTH);
+                    let (min_w, min_h) = p.min_size();
+                    if edges & RESIZE_LEFT != 0 {
+                        left = (orig.x + dx).clamp(0, right - min_w);
                     }
-                    if st.edges & RESIZE_RIGHT != 0 {
-                        right = (orig.x + orig.w + dx).clamp(left + MIN_WINDOW_WIDTH, ws_w);
+                    if edges & RESIZE_RIGHT != 0 {
+                        right = (orig.x + orig.w + dx).clamp(left + min_w, ws_w);
                     }
-                    if st.edges & RESIZE_TOP != 0 {
-                        top = (orig.y + dy).clamp(0, bottom - MIN_WINDOW_HEIGHT);
+                    if edges & RESIZE_TOP != 0 {
+                        top = (orig.y + dy).clamp(0, bottom - min_h);
                     }
-                    if st.edges & RESIZE_BOTTOM != 0 {
-                        bottom = (orig.y + orig.h + dy).clamp(top + MIN_WINDOW_HEIGHT, ws_h);
+                    if edges & RESIZE_BOTTOM != 0 {
+                        bottom = (orig.y + orig.h + dy).clamp(top + min_h, ws_h);
                     }
 
                     p.set_windowed_rect(
@@ -1683,7 +1829,19 @@ impl BrowserPane {
                 });
             }
 
-            // Release finishes resize
+            // Release / grab-broken finishes resize
+            {
+                let rs = Rc::clone(&rstate);
+                strip.connect_grab_broken_event(move |w, _| {
+                    let mut st = rs.borrow_mut();
+                    st.active = false;
+                    st.orig = None;
+                    if let Some(win) = w.window() {
+                        win.set_cursor(None);
+                    }
+                    glib::Propagation::Proceed
+                });
+            }
             {
                 let rs = Rc::clone(&rstate);
                 strip.connect_button_release_event(move |w, _| {
@@ -1863,12 +2021,13 @@ impl BrowserPane {
     pub fn on_workspace_resized(&self, workspace: &gtk::Layout, alloc_w: i32, alloc_h: i32) {
         let ws_w = alloc_w.max(MIN_WINDOW_WIDTH);
         let ws_h = alloc_h.max(MIN_WINDOW_HEIGHT);
+        let (min_w, min_h) = self.min_size();
         let target = if self.maximized.get() {
             PaneRect { x: 0, y: 0, w: ws_w, h: ws_h }
         } else {
             let mut cur = *self.current_rect.borrow();
-            cur.w = cur.w.clamp(MIN_WINDOW_WIDTH, ws_w);
-            cur.h = cur.h.clamp(MIN_WINDOW_HEIGHT, ws_h);
+            cur.w = cur.w.clamp(min_w, ws_w);
+            cur.h = cur.h.clamp(min_h, ws_h);
             cur.x = cur.x.clamp(-cur.w + 80, (ws_w - 80).max(0));
             cur.y = cur.y.clamp(0, (ws_h - TITLE_BAR_HEIGHT).max(0));
             cur
@@ -1887,8 +2046,10 @@ impl BrowserPane {
 
     pub fn set_minimized(&self, minimized: bool) {
         if minimized {
-            // Refresh thumbnail cache BEFORE hiding so Alt+Tab switcher keeps preview!
-            let _ = self.preview_pixbuf(202, 112);
+            // Preserve existing live WebView snapshot if already cached; only fallback to root draw if empty
+            if self.last_preview.borrow().is_none() {
+                let _ = self.preview_pixbuf(202, 112);
+            }
             self.minimized.set(true);
             self.root.hide();
         } else {
@@ -2023,10 +2184,141 @@ impl BrowserPane {
         }
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        if self.floating_proctoring.get() {
+            (160, 120)
+        } else {
+            (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        }
+    }
+
     pub fn print_page(&self) {
         if self.allow_print {
+            let parent = self
+                .root
+                .toplevel()
+                .and_then(|w| w.downcast::<gtk::Window>().ok());
             let op = PrintOperation::new(&self.web_view);
-            op.run_dialog(None::<&gtk::Window>);
+            dialogs::with_external_modal(|| {
+                op.run_dialog(parent.as_ref());
+            });
+        }
+    }
+
+    /// Converts this pane into a borderless, always-on-top floating proctoring window:
+    /// hides titlebar & toolbar, allows shrinking to 160x120, and lets the user drag it freely.
+    pub fn enable_floating_proctoring_mode(self: &Rc<Self>, workspace: &gtk::Layout) {
+        self.floating_proctoring.set(true);
+        self.title_event_box.set_no_show_all(true);
+        self.title_event_box.hide();
+        // Hide any top hairline divider above the webview
+        for child in self.frame_box.children() {
+            if child.style_context().has_class("seb-hairline")
+                || child.style_context().has_class("seb-toolbar")
+            {
+                child.set_no_show_all(true);
+                child.hide();
+            }
+        }
+
+        #[derive(Default)]
+        struct FloatDrag {
+            active: bool,
+            dragging: bool,
+            start_rx: f64,
+            start_ry: f64,
+            orig_x: i32,
+            orig_y: i32,
+        }
+        let drag = Rc::new(RefCell::new(FloatDrag::default()));
+        {
+            let d = Rc::clone(&drag);
+            let p = Rc::clone(self);
+            self.web_view.connect_button_press_event(move |_, ev| {
+                if ev.button() == 1 {
+                    let (rx, ry) = ev.root();
+                    let cur = *p.current_rect.borrow();
+                    let mut st = d.borrow_mut();
+                    st.active = true;
+                    st.dragging = false;
+                    st.start_rx = rx;
+                    st.start_ry = ry;
+                    st.orig_x = cur.x;
+                    st.orig_y = cur.y;
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        {
+            let d = Rc::clone(&drag);
+            let p = Rc::clone(self);
+            let ws = workspace.clone();
+            self.web_view.connect_motion_notify_event(move |_, ev| {
+                if !ev.state().contains(gdk::ModifierType::BUTTON1_MASK) {
+                    let mut st = d.borrow_mut();
+                    st.active = false;
+                    st.dragging = false;
+                    return glib::Propagation::Proceed;
+                }
+                let mut st = d.borrow_mut();
+                if !st.active {
+                    return glib::Propagation::Proceed;
+                }
+                let (rx, ry) = ev.root();
+                if !st.dragging
+                    && (rx - st.start_rx).abs().max((ry - st.start_ry).abs()) >= 4.0
+                {
+                    st.dragging = true;
+                }
+                let is_dragging = st.dragging;
+                let orig_x = st.orig_x;
+                let orig_y = st.orig_y;
+                let start_rx = st.start_rx;
+                let start_ry = st.start_ry;
+                drop(st);
+                if is_dragging {
+                    let ws_w = ws.allocated_width().max(MIN_WINDOW_WIDTH);
+                    let ws_h = ws.allocated_height().max(MIN_WINDOW_HEIGHT);
+                    let cur = *p.current_rect.borrow();
+                    let nx = (orig_x + (rx - start_rx) as i32).clamp(0, (ws_w - cur.w).max(0));
+                    let ny = (orig_y + (ry - start_ry) as i32).clamp(0, (ws_h - cur.h).max(0));
+                    p.set_windowed_rect(
+                        &ws,
+                        PaneRect {
+                            x: nx,
+                            y: ny,
+                            w: cur.w,
+                            h: cur.h,
+                        },
+                        false,
+                    );
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        {
+            let d = Rc::clone(&drag);
+            self.web_view.connect_grab_broken_event(move |_, _| {
+                let mut st = d.borrow_mut();
+                st.active = false;
+                st.dragging = false;
+                glib::Propagation::Proceed
+            });
+        }
+        {
+            let d = Rc::clone(&drag);
+            self.web_view.connect_button_release_event(move |_, _| {
+                let mut st = d.borrow_mut();
+                let was_dragging = st.dragging;
+                st.active = false;
+                st.dragging = false;
+                if was_dragging {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
         }
     }
 
@@ -2069,16 +2361,33 @@ impl BrowserPane {
         self.current_url.borrow().clone()
     }
 
-    /// Captures a preview Pixbuf of ONLY this SEB internal pane (cached for minimized panes!).
+    pub fn favicon_pixbuf(&self, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
+        let sz = size.max(8);
+        self.current_favicon
+            .borrow()
+            .as_ref()
+            .and_then(|pb| pb.scale_simple(sz, sz, gdk_pixbuf::InterpType::Bilinear))
+    }
+
+    /// Returns cached live WebView preview if available, or captures a fallback Cairo draw.
     pub fn preview_pixbuf(&self, target_w: i32, target_h: i32) -> Option<gdk_pixbuf::Pixbuf> {
+        if let Some(cached) = self.last_preview.borrow().clone() {
+            return cached
+                .scale_simple(
+                    target_w.max(16),
+                    target_h.max(16),
+                    gdk_pixbuf::InterpType::Bilinear,
+                )
+                .or(Some(cached));
+        }
         if self.minimized.get() || !self.root.is_visible() || !self.root.is_mapped() {
-            return self.last_preview.borrow().clone();
+            return None;
         }
         let alloc = self.root.allocation();
         let w = alloc.width();
         let h = alloc.height();
         if w <= 0 || h <= 0 {
-            return self.last_preview.borrow().clone();
+            return None;
         }
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).ok()?;
         let cr = cairo::Context::new(&surface).ok()?;
@@ -2095,6 +2404,50 @@ impl BrowserPane {
         }
         scaled
     }
+
+    /// Asynchronously captures a real accelerated WebKitGTK visible snapshot (works on Wayland
+    /// & X11 DMABuf!) and updates `last_preview` + invokes `on_ready`.
+    pub fn refresh_preview_async(
+        self: &Rc<Self>,
+        target_w: i32,
+        target_h: i32,
+        on_ready: Option<Box<dyn Fn(gdk_pixbuf::Pixbuf)>>,
+    ) {
+        if self.minimized.get() || !self.root.is_visible() || !self.web_view.is_mapped() {
+            return;
+        }
+        let p = Rc::clone(self);
+        let tw = target_w.max(16);
+        let th = target_h.max(16);
+        self.web_view.snapshot(
+            webkit2gtk::SnapshotRegion::Visible,
+            webkit2gtk::SnapshotOptions::NONE,
+            gio::Cancellable::NONE,
+            move |res| {
+                if let Ok(surf) = res {
+                    if let Some(pb) = surface_to_pixbuf(surf) {
+                        let scaled = pb
+                            .scale_simple(tw, th, gdk_pixbuf::InterpType::Bilinear)
+                            .unwrap_or(pb);
+                        *p.last_preview.borrow_mut() = Some(scaled.clone());
+                        if let Some(ref cb) = on_ready {
+                            cb(scaled);
+                        }
+                    }
+                }
+            },
+        );
+    }
+}
+
+fn surface_to_pixbuf(surface: cairo::Surface) -> Option<gdk_pixbuf::Pixbuf> {
+    let img = cairo::ImageSurface::try_from(surface).ok()?;
+    let w = img.width();
+    let h = img.height();
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    gdk::pixbuf_get_from_surface(&img, 0, 0, w, h)
 }
 
 pub fn verify_password_or_hash(entered: &str, expected_hash: &str) -> bool {

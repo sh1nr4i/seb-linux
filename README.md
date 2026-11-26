@@ -1,22 +1,22 @@
 <div align="center">
   <img src="assets/icons/safe-exam-browser.png" alt="Safe Exam Browser for Linux logo" width="120" />
-  <h1>Safe Exam Browser for Linux (Pure Rust)</h1>
-  <p>A 100% Pure Rust, native Linux client for Safe Exam Browser built with GTK3, WebKitGTK 4.1, and kernel-level anti-cheat lockdown.</p>
+  <h1>Safe Exam Browser for Linux (Rust)</h1>
+  <p>A native Linux client for Safe Exam Browser written in Rust with GTK3, WebKitGTK 4.1, and kernel-level anti-cheat lockdown.</p>
 </div>
 
 > [!NOTE]
-> **Beta Release (`v0.6.1-beta`)**: Core exam flows, Moodle `.seb` reconfiguration, SEB Server, Screen Proctoring, and kernel-level anti-cheat lockdown are implemented and tested, while broader real-world exam scenarios across Linux distributions are still being validated. Please report any issues you encounter.
+> **Beta Release (`v0.6.2-beta`)**: Core exam flows, Moodle `.seb` reconfiguration, SEB Server, Screen Proctoring, and kernel-level anti-cheat lockdown are implemented and tested, while broader real-world exam scenarios across Linux distributions are still being validated. Please report any issues you encounter.
 
 ## Overview
 
-`seb-linux-rust` is a clean, 100% Pure Rust implementation of Safe Exam Browser for Linux with zero C/C++, zero CMake, and zero Qt dependencies. It supports both **Wayland** and **X11** desktops across Debian/Ubuntu, Fedora/RHEL, Arch Linux, openSUSE, and other distributions.
+`seb-linux-rust` is a Rust implementation of Safe Exam Browser for Linux with zero C/C++, zero CMake, and zero Qt dependencies. It supports both **Wayland** and **X11** desktops across Debian/Ubuntu, Fedora/RHEL, Arch Linux, openSUSE, and other distributions.
 
 ## Key Features
 
-- **100% Pure Rust Workspace**: Modular 9-crate architecture (`seb-app`, `seb-config`, `seb-filter`, `seb-security`, `seb-lockdown-helper`, `seb-platform`, `seb-server`, `seb-proctoring`, `seb-web-extension`).
+- **Rust Workspace**: Modular 9-crate architecture (`seb-app`, `seb-config`, `seb-filter`, `seb-security`, `seb-lockdown-helper`, `seb-platform`, `seb-server`, `seb-proctoring`, `seb-web-extension`).
 - **Full `.seb` Configuration & Moodle SSO Support**:
   - Opens local `.seb` files and `seb://` / `sebs://` links, including encrypted RNCryptor v2, zlib/gzip, and PKCS#12/RSA-OAEP client certificates.
-  - Preserves browser session cookies during `LoadWithBrowser` SSO login transitions and injects `X-SafeExamBrowser-ConfigKeyHash` and `X-SafeExamBrowser-RequestHash` via a Pure Rust WebKitGTK Web Extension (`libseb_web_extension.so`), plus `window.SafeExamBrowser.security` JS API.
+  - Preserves browser session cookies during `LoadWithBrowser` SSO login transitions and injects `X-SafeExamBrowser-ConfigKeyHash` and `X-SafeExamBrowser-RequestHash` via a Rust WebKitGTK Web Extension (`libseb_web_extension.so`), plus `window.SafeExamBrowser.security` JS API.
 - **Kernel-Level Anti-Cheat Lockdown (`safe-exam-browser-lockdown`)**:
   - Activated automatically in **User Build** via Polkit (`pkexec`) or `doas` — `safe-exam-browser` itself never runs as `root`.
   - Two-phase startup: prohibited-process pre-flight dialog runs before `evdev` keyboard grab so examinees can close blocked apps cleanly.
@@ -24,7 +24,7 @@
   - Blocks 3+/4-finger OS touchpad gestures while cloning physical touchpad identity (`EVIOCGID`/`EVIOCGNAME`) so OS settings (`NaturalScroll`, acceleration, tap-to-click) stay intact.
   - Triple fail-safe automatic unlock: `PR_SET_PDEATHSIG(SIGTERM)`, `stdin` EOF detection, and a 6-second heartbeat watchdog.
 - **Native Desktop Integration (Zero External Shell Wrappers)**:
-  - Pure Rust D-Bus (`zbus`) for NetworkManager / `iwd` Wi-Fi management (including in-app Wi-Fi connection), `login1`/`elogind`/`ScreenSaver` power inhibition, and Secret Service.
+  - Rust D-Bus (`zbus`) for NetworkManager / `iwd` Wi-Fi management (including in-app Wi-Fi connection), `login1`/`elogind`/`ScreenSaver` power inhibition, and Secret Service.
   - Native PulseAudio/PipeWire Unix socket for audio volume/mute, kernel `sysfs` battery monitoring, and `x11rb` XKB/window controls.
 - **SEB Server & Window-Only Screen Proctoring**:
   - Non-blocking SEB Server ping/instruction loop (`SEB_QUIT`, `SEB_FORCE_LOCK_SCREEN`, `SEB_PROCTORING`, raise/lower hand, log reporting).
@@ -36,11 +36,11 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
 
 - **Debian / Ubuntu (`.deb`)**:
   ```bash
-  sudo apt install ./safe-exam-browser_0.6.1_amd64.deb
+  sudo apt install ./safe-exam-browser_0.6.2_amd64.deb
   ```
 - **Fedora / RHEL (`.rpm`)**:
   ```bash
-  sudo dnf install ./safe-exam-browser-0.6.1-1.*.x86_64.rpm
+  sudo dnf install ./safe-exam-browser-0.6.2-1.*.x86_64.rpm
   ```
 - **Arch Linux (`PKGBUILD`)**:
   ```bash
@@ -48,8 +48,8 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
   ```
 - **Universal Linux Tarball (`.tar.gz`)**:
   ```bash
-  tar -xzf safe-exam-browser-0.6.1-linux-x86_64.tar.gz
-  cd safe-exam-browser-0.6.1-linux-x86_64
+  tar -xzf safe-exam-browser-0.6.2-linux-x86_64.tar.gz
+  cd safe-exam-browser-0.6.2-linux-x86_64
   sudo ./install.sh
   ```
 
@@ -116,7 +116,7 @@ safe-exam-browser "sebs://lms.example.edu/mod/quiz/accessrule/seb/config.php?cmi
 | `crates/seb-filter` | Main-frame & subresource URL filter rules and `.seb` resource detection |
 | `crates/seb-security` | Runtime integrity, VM/debugger/display checks, power inhibition (`zbus`), `LockdownClient` |
 | `crates/seb-lockdown-helper` | Privileged `evdev`/`uinput` keyboard & touchpad gesture filter and root process scanner |
-| `crates/seb-platform` | Pure Rust audio (PulseAudio socket), battery (`sysfs`), Wi-Fi/network (`zbus`), keyboard layout |
+| `crates/seb-platform` | Rust audio (PulseAudio socket), battery (`sysfs`), Wi-Fi/network (`zbus`), keyboard layout |
 | `crates/seb-proctoring` | Window-only Screen Proctoring capture pipeline and metadata encoding |
 | `crates/seb-server` | SEB Server OAuth2/API client, ping/instructions, and sanitization |
 | `crates/seb-web-extension` | WebKitGTK 4.1 `cdylib` injecting SEB key hashes and enforcing subresource URL filters |

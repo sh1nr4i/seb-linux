@@ -66,15 +66,24 @@ fn same_host(first_party: &str, request_uri: &str) -> bool {
 unsafe fn is_main_frame_request(
     page: *mut c_void,
     request: *mut c_void,
-    redirect_response: *mut c_void,
+    _redirect_response: *mut c_void,
     uri: &str,
     page_uri: &str,
 ) -> bool {
     if page_uri.is_empty() || page_uri == uri {
         return true;
     }
-    if !redirect_response.is_null() {
-        return true;
+    // Check Fetch Metadata first: Sec-Fetch-Dest is authoritative when present
+    // so iframes / XHR / redirected subresources are never misclassified as MainFrame.
+    let headers = webkit_uri_request_get_http_headers(request);
+    if !headers.is_null() {
+        let dest_ptr =
+            soup_message_headers_get_one(headers, b"Sec-Fetch-Dest\0".as_ptr() as *const c_char);
+        if !dest_ptr.is_null() {
+            if let Ok(dest) = CStr::from_ptr(dest_ptr).to_str() {
+                return dest.eq_ignore_ascii_case("document");
+            }
+        }
     }
     if !page.is_null() {
         let main_frame = webkit_web_page_get_main_frame(page);
@@ -89,18 +98,7 @@ unsafe fn is_main_frame_request(
             }
         }
     }
-    // Check Fetch Metadata / Accept header for top-level document navigation
-    let headers = webkit_uri_request_get_http_headers(request);
     if !headers.is_null() {
-        let dest_ptr =
-            soup_message_headers_get_one(headers, b"Sec-Fetch-Dest\0".as_ptr() as *const c_char);
-        if !dest_ptr.is_null() {
-            if let Ok(dest) = CStr::from_ptr(dest_ptr).to_str() {
-                if dest.eq_ignore_ascii_case("document") {
-                    return true;
-                }
-            }
-        }
         let accept_ptr =
             soup_message_headers_get_one(headers, b"Accept\0".as_ptr() as *const c_char);
         if !accept_ptr.is_null() {
@@ -133,8 +131,12 @@ unsafe extern "C" fn on_send_request(
         return 0;
     };
 
-    // Unconditionally block mailto: (100% parity with C++ request_interceptor.cpp)
-    if uri.len() >= 7 && uri[..7].eq_ignore_ascii_case("mailto:") {
+    // Unconditionally block mailto: (byte-safe check across FFI boundary)
+    if uri
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"mailto:"))
+    {
         return 1;
     }
 

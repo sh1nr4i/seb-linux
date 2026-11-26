@@ -75,10 +75,12 @@ pub fn match_prohibited_name(
         || is_wrapper_executable(exe_name)
         || is_wrapper_executable(comm_name);
     if check_wrapped {
-        for arg in cmdline_args.iter().skip(1).take(4) {
-            if arg.starts_with('-') {
-                continue;
-            }
+        for arg in cmdline_args
+            .iter()
+            .skip(1)
+            .filter(|a| !a.starts_with('-'))
+            .take(4)
+        {
             let b = basename_lower(arg);
             if !b.is_empty() && prohibited.contains(&b) {
                 return Some(b);
@@ -224,6 +226,25 @@ mod tests {
                 "python3.12",
                 "python3",
                 &["/usr/bin/python3".to_string(), "/usr/bin/kazam".to_string()],
+            ),
+            Some("kazam".to_string())
+        );
+
+        // Wrapper launched with 5+ leading flags must still detect the target script/binary
+        assert_eq!(
+            match_prohibited_name(
+                &set,
+                "python3.12",
+                "python3",
+                &[
+                    "/usr/bin/python3".to_string(),
+                    "-u".to_string(),
+                    "-O".to_string(),
+                    "-B".to_string(),
+                    "-s".to_string(),
+                    "-E".to_string(),
+                    "/usr/bin/kazam".to_string(),
+                ],
             ),
             Some("kazam".to_string())
         );

@@ -31,7 +31,7 @@ Run the local binary (never run with `sudo`):
 
 ## Pull Requests
 
-- Keep changes 100% Pure Rust (no C/C++, CMake, or Qt files).
+- Keep changes in Rust (no C/C++, CMake, or Qt files).
 - Never include personal or institutional domains/URLs in code, tests, docs, or commits (use `lms.example.edu` or `example.org`).
 - Keep commits focused per feature or fix.
 - Update documentation when behavior, CLI options, or packaging changes.

@@ -404,7 +404,7 @@ fn normalize_iso_datetime_utc(dt: &str) -> Option<(i64, u32, u32, u32, u32, u32,
         let (oh, om): (i64, i64) = if let Some((h, m)) = tz.split_once(':') {
             (h.parse().ok()?, m.parse().ok()?)
         } else if tz.len() == 4 {
-            (tz[0..2].parse().ok()?, tz[2..4].parse().ok()?)
+            (tz.get(0..2)?.parse().ok()?, tz.get(2..4)?.parse().ok()?)
         } else if tz.len() == 2 {
             (tz.parse().ok()?, 0)
         } else {
@@ -630,5 +630,12 @@ mod tests {
         assert_eq!(cfg.settings.browser.start_url_query, "?attempt=9");
         assert!(cfg.settings.security.allow_reconfiguration);
         assert!(cfg.settings.service.ignore_service);
+    }
+
+    #[test]
+    fn normalize_iso_datetime_handles_non_ascii_timezone_without_panicking() {
+        // Non-ASCII 4-byte UTF-8 timezone suffix must not panic on byte-index slicing
+        assert_eq!(normalize_iso_datetime_utc("2026-01-01T10:00:00+😀"), None);
+        assert!(normalize_iso_datetime_utc("2026-01-01T10:00:00+0200").is_some());
     }
 }

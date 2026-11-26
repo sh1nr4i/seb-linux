@@ -124,6 +124,9 @@ pub enum LockdownEvent {
     AltTabStep { backwards: bool },
     AltTabCommit,
     AltTabCancel,
+    NavBack,
+    NavForward,
+    NavHome,
     Violation { reason: String, prohibited: Vec<String> },
     HelperTerminated { reason: String },
 }
@@ -242,9 +245,12 @@ impl LockdownClient {
                 .to_string()
         })?;
 
-        self.stopping.store(false, Ordering::SeqCst);
+        // Allocate a fresh per-session stopping flag so any lingering thread from a
+        // previous session can never clobber the new session's SyncState or send duplicate heartbeats.
+        let session_stop = Arc::new(AtomicBool::new(false));
+        self.stopping = Arc::clone(&session_stop);
         {
-            let mut st = self.sync.0.lock().unwrap();
+            let mut st = self.sync.0.lock().unwrap_or_else(|e| e.into_inner());
             *st = SyncState::default();
         }
 
@@ -252,17 +258,17 @@ impl LockdownClient {
             .arg(&helper)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("Unable to start SEB lockdown helper: {e}"))?;
 
         let child_stdin = child.stdin.take();
         let child_stdout = child.stdout.take().ok_or("Failed to open helper stdout.")?;
-        *self.stdin.lock().unwrap() = child_stdin;
+        *self.stdin.lock().unwrap_or_else(|e| e.into_inner()) = child_stdin;
         self.child = Some(child);
 
         let sync = Arc::clone(&self.sync);
-        let stopping = Arc::clone(&self.stopping);
+        let stopping = Arc::clone(&session_stop);
         let event_tx = self.event_tx.clone();
         let violation_reported = Arc::new(AtomicBool::new(false));
 
@@ -370,6 +376,15 @@ impl LockdownClient {
                     "alt_tab_cancel" => {
                         let _ = event_tx.send(LockdownEvent::AltTabCancel);
                     }
+                    "nav_back" => {
+                        let _ = event_tx.send(LockdownEvent::NavBack);
+                    }
+                    "nav_forward" => {
+                        let _ = event_tx.send(LockdownEvent::NavForward);
+                    }
+                    "nav_home" => {
+                        let _ = event_tx.send(LockdownEvent::NavHome);
+                    }
                     "error" => {
                         let msg = val
                             .get("message")
@@ -470,7 +485,7 @@ impl LockdownClient {
     }
 
     pub fn activate_lockdown(
-        &self,
+        &mut self,
         policy: &KeyboardLockPolicy,
         blacklist: &[String],
     ) -> Result<(), String> {
@@ -502,6 +517,14 @@ impl LockdownClient {
         }
         if !st.locked {
             return Err("Failed to activate SEB lockdown.".to_string());
+        }
+        if !st.keyboard_locked {
+            drop(st);
+            self.stop();
+            return Err(
+                "Kernel keyboard lockdown could not be activated (/dev/uinput or evdev unavailable)."
+                    .to_string(),
+            );
         }
         drop(st);
 
@@ -575,8 +598,17 @@ impl LockdownClient {
                             break;
                         }
                         if Instant::now() >= term_deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            // Note: pkexec is SUID-root so SIGKILL from unprivileged user may fail with EPERM.
+                            // Never block indefinitely in child.wait() if kill() fails!
+                            if child.kill().is_ok() {
+                                let kill_deadline = Instant::now() + Duration::from_millis(500);
+                                while Instant::now() < kill_deadline {
+                                    if matches!(child.try_wait(), Ok(Some(_))) {
+                                        break;
+                                    }
+                                    thread::sleep(Duration::from_millis(25));
+                                }
+                            }
                             break;
                         }
                         thread::sleep(Duration::from_millis(30));

@@ -25,10 +25,10 @@ cd "${ROOT_DIR}"
 
 CARGO_ARGS=(build --release -p seb-app -p seb-lockdown-helper -p seb-web-extension)
 if [[ "${DEV_BUILD}" -eq 1 ]]; then
-  echo "Building 100% Pure Rust Safe Exam Browser (Dev Build: --features seb-app/dev)..."
+  echo "Building Safe Exam Browser (Rust, Dev Build: --features seb-app/dev)..."
   CARGO_ARGS+=(--features seb-app/dev)
 else
-  echo "Building 100% Pure Rust Safe Exam Browser (User Build: strict anti-cheat default)..."
+  echo "Building Safe Exam Browser (Rust, User Build: strict anti-cheat default)..."
 fi
 
 cargo "${CARGO_ARGS[@]}"

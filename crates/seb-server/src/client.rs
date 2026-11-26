@@ -116,22 +116,46 @@ impl SebServerClient {
             .ok_or_else(|| "Invalid OAuth token endpoint.".to_string())?;
         let creds = base64::engine::general_purpose::STANDARD
             .encode(format!("{}:{}", self.cfg.client_name, self.cfg.client_secret));
-        let resp = self
-            .agent
-            .post(&url)
-            .set("Authorization", &format!("Basic {creds}"))
-            .set("Content-Type", "application/x-www-form-urlencoded")
-            .set("Accept", "application/json")
-            .send_string("grant_type=client_credentials&scope=read%20write")
-            .map_err(|e| format!("SEB Server OAuth failed: {e}"))?;
-        let mut body = Vec::new();
-        resp.into_reader()
-            .take(1024 * 1024)
-            .read_to_end(&mut body)
-            .map_err(|e| e.to_string())?;
-        let token = parse_oauth_token(&body)?;
-        self.oauth_token = token.clone();
-        Ok(token)
+        let attempts = self.cfg.request_attempts.max(1);
+        let interval = Duration::from_millis(self.cfg.request_attempt_interval_ms.max(250));
+        let mut last_err = String::from("SEB Server OAuth failed.");
+        for attempt in 0..attempts {
+            match self
+                .agent
+                .post(&url)
+                .set("Authorization", &format!("Basic {creds}"))
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .set("Accept", "application/json")
+                .send_string("grant_type=client_credentials&scope=read%20write")
+            {
+                Ok(resp) => {
+                    let mut body = Vec::new();
+                    resp.into_reader()
+                        .take(1024 * 1024)
+                        .read_to_end(&mut body)
+                        .map_err(|e| e.to_string())?;
+                    let token = parse_oauth_token(&body)?;
+                    self.oauth_token = token.clone();
+                    return Ok(token);
+                }
+                Err(ureq::Error::Status(code, _)) => {
+                    last_err = format!("SEB Server OAuth HTTP {code}");
+                    let retryable = code == 408 || code == 429 || code >= 500;
+                    if !retryable || attempt + 1 >= attempts {
+                        break;
+                    }
+                    thread::sleep(interval);
+                }
+                Err(e) => {
+                    last_err = format!("SEB Server OAuth failed: {e}");
+                    if attempt + 1 >= attempts {
+                        break;
+                    }
+                    thread::sleep(interval);
+                }
+            }
+        }
+        Err(last_err)
     }
 
     pub fn handshake(&mut self, os_name: &str, seb_version: &str) -> Result<HandshakeResult, String> {
@@ -460,10 +484,15 @@ impl SebServerClient {
 
     /// Returns true if server disconnect succeeded (matches C++ `disconnectFromServer` with `delete=true`).
     pub fn disconnect(&mut self) -> bool {
-        if self.connection_token.is_empty() || self.api.handshake_endpoint.is_empty() {
+        if self.connection_token.is_empty() {
             return true;
         }
-        let ok = if let Some(url) = resolve_url(&self.base_url, &self.api.handshake_endpoint) {
+        let ep = if self.api.handshake_endpoint.is_empty() {
+            "/sebapi/v1/handshake"
+        } else {
+            &self.api.handshake_endpoint
+        };
+        let ok = if let Some(url) = resolve_url(&self.base_url, ep) {
             self.execute_once(
                 "DELETE",
                 &url,

@@ -269,9 +269,9 @@ button.seb-chrome-btn:hover {
 }
 
 button.seb-chrome-btn:active {
-    background: #add8e6;
+    background: #87ceeb;
     background-image: none;
-    border: 2px solid #87ceeb;
+    border: 1px solid #1e90ff;
     color: black;
 }
 
@@ -314,6 +314,94 @@ button.seb-title-btn:disabled {
     background: #f0f0f0;
     border: 1px solid #f0f0f0;
     opacity: 0.35;
+}
+
+window.seb-dialog button.seb-danger-btn,
+.seb-dialog button.seb-danger-btn,
+button.seb-danger-btn {
+    background-color: #c62828;
+    background: #c62828;
+    background-image: none;
+    color: #ffffff;
+    border: 1px solid #8e0000;
+    border-radius: 0px;
+    padding: 4px 12px;
+    min-height: 30px;
+    font-weight: 700;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+window.seb-dialog button.seb-danger-btn label,
+.seb-dialog button.seb-danger-btn label,
+button.seb-danger-btn label {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+window.seb-dialog button.seb-danger-btn:hover,
+.seb-dialog button.seb-danger-btn:hover,
+button.seb-danger-btn:hover {
+    background-color: #b71c1c;
+    background: #b71c1c;
+    background-image: none;
+    border: 1px solid #7f0000;
+    color: #ffffff;
+}
+
+window.seb-dialog button.seb-danger-btn:active,
+.seb-dialog button.seb-danger-btn:active,
+button.seb-danger-btn:active {
+    background-color: #8e0000;
+    background: #8e0000;
+    background-image: none;
+    border: 1px solid #5f0000;
+    color: #ffffff;
+}
+
+window.seb-dialog button.seb-proc-kill-btn,
+.seb-dialog button.seb-proc-kill-btn,
+button.seb-proc-kill-btn {
+    background-color: transparent;
+    background: transparent;
+    background-image: none;
+    color: black;
+    border: none;
+    border-radius: 0px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0px 6px;
+    font-weight: 700;
+    font-size: 14px;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+window.seb-dialog button.seb-proc-kill-btn label,
+.seb-dialog button.seb-proc-kill-btn label,
+button.seb-proc-kill-btn label {
+    color: black;
+    font-weight: 700;
+}
+
+window.seb-dialog button.seb-proc-kill-btn:hover,
+.seb-dialog button.seb-proc-kill-btn:hover,
+button.seb-proc-kill-btn:hover {
+    background-color: #d8d8d8;
+    background: #d8d8d8;
+    background-image: none;
+    border: none;
+    color: black;
+}
+
+window.seb-dialog button.seb-proc-kill-btn:active,
+.seb-dialog button.seb-proc-kill-btn:active,
+button.seb-proc-kill-btn:active {
+    background-color: #b0b0b0;
+    background: #b0b0b0;
+    background-image: none;
+    border: none;
+    color: black;
 }
 
 entry,
@@ -410,15 +498,10 @@ button.seb-ac-win-row:hover {
 }
 
 .seb-switcher-card {
-    background-color: lightgray;
-    border: 2px solid gray;
+    background-color: transparent;
+    border: 2px solid transparent;
     border-radius: 4px;
     padding: 7px 8px 8px 8px;
-}
-
-.seb-switcher-card:hover {
-    background-color: #add8e6;
-    border: 2px solid #1e90ff;
 }
 
 .seb-switcher-card.selected {
@@ -427,13 +510,12 @@ button.seb-ac-win-row:hover {
 }
 
 .seb-switcher-thumb {
-    background-color: #d8d8d8;
+    background-color: #f0f0f0;
     border: 1px solid #b0b0b0;
     color: #696969;
 }
 
-.seb-switcher-card.selected .seb-switcher-thumb,
-.seb-switcher-card:hover .seb-switcher-thumb {
+.seb-switcher-card.selected .seb-switcher-thumb {
     border: 1px solid #1e90ff;
 }
 
@@ -578,6 +660,181 @@ menuitem:hover {
 
 .seb-clock-date {
     color: #696969;
+}
+
+button.seb-chrome-btn.seb-battery-low {
+    border-bottom: 3px solid #d48806;
+}
+
+button.seb-chrome-btn.seb-battery-critical {
+    border-bottom: 3px solid #cf1322;
+}
+
+.seb-file-scroll {
+    background-color: #f0f0f0;
+    border: 1px solid gray;
+}
+
+.seb-file-header {
+    background-color: #d8d8d8;
+    border-bottom: 1px solid #b0b0b0;
+    padding: 4px 10px;
+}
+
+.seb-file-header label {
+    color: black;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+list.seb-file-list {
+    background-color: #f0f0f0;
+    color: black;
+}
+
+list.seb-file-list row {
+    background-color: #f0f0f0;
+    color: black;
+    padding: 4px 8px;
+    border-bottom: 1px solid #d8d8d8;
+}
+
+list.seb-file-list row label {
+    color: black;
+}
+
+list.seb-file-list row label.seb-secondary-text {
+    color: #696969;
+}
+
+list.seb-file-list row:hover {
+    background-color: #add8e6;
+    color: black;
+}
+
+list.seb-file-list row:selected,
+list.seb-file-list row:selected:hover {
+    background-color: #1e90ff;
+    color: #f0f0f0;
+}
+
+list.seb-file-list row:selected label,
+list.seb-file-list row:selected label.seb-secondary-text {
+    color: #f0f0f0;
+    font-weight: 600;
+}
+
+scrolledwindow.seb-log-scroll {
+    background-color: #f0f0f0;
+    border: 1px solid gray;
+}
+
+textview.seb-log-view,
+textview.seb-log-view text {
+    background-color: #f0f0f0;
+    color: black;
+    font-size: 12px;
+}
+
+/* High-contrast light styling for GTK Print Dialog (Ctrl+P / GtkPrintUnixDialog) */
+dialog,
+window.background,
+dialog notebook,
+dialog notebook > stack,
+dialog notebook > header,
+dialog frame,
+dialog headerbar {
+    background-color: #f0f0f0;
+    background-image: none;
+    color: black;
+}
+
+dialog label,
+dialog checkbutton,
+dialog radiobutton,
+dialog notebook tab label {
+    color: black;
+}
+
+dialog notebook tab {
+    background-color: #d8d8d8;
+    color: black;
+    border: 1px solid #b0b0b0;
+    padding: 4px 10px;
+}
+
+dialog notebook tab:checked {
+    background-color: #f0f0f0;
+    border-bottom: 2px solid #1e90ff;
+    color: black;
+}
+
+dialog button,
+dialog combobox button,
+dialog spinbutton,
+dialog spinbutton button {
+    background-color: #f0f0f0;
+    background-image: none;
+    color: black;
+    border: 1px solid gray;
+    box-shadow: none;
+    text-shadow: none;
+}
+
+dialog button:hover,
+dialog combobox button:hover {
+    background-color: #add8e6;
+    border: 1px solid #1e90ff;
+    color: black;
+}
+
+dialog treeview header button {
+    background-color: #d8d8d8;
+    color: black;
+    border: 1px solid #b0b0b0;
+}
+
+dialog treeview:selected {
+    background-color: #1e90ff;
+    color: #f0f0f0;
+}
+
+/* Mobile / Touch UI Mode (UserInterfaceMode::Mobile) */
+window.seb-mobile .seb-taskbar {
+    min-height: 52px;
+}
+
+window.seb-mobile .seb-titlebar {
+    min-height: 36px;
+}
+
+window.seb-mobile .seb-titlebar label {
+    font-size: 13px;
+}
+
+window.seb-mobile .seb-toolbar {
+    min-height: 50px;
+}
+
+window.seb-mobile button.seb-title-btn {
+    min-width: 44px;
+    min-height: 36px;
+}
+
+window.seb-mobile button.seb-chrome-btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0px 8px;
+}
+
+window.seb-mobile button.seb-ac-tile {
+    min-height: 76px;
+}
+
+window.seb-mobile entry,
+window.seb-mobile entry.seb-url-entry {
+    min-height: 36px;
+    font-size: 14px;
 }
 "#;
 

@@ -3,8 +3,9 @@ use crate::assets;
 use crate::browser_pane::{verify_password_or_hash, BrowserPane, PaneAction, PaneRect};
 use crate::clipboard::{clear_gtk_clipboards, IsolatedClipboard};
 use crate::dialogs::{self, PreflightAction, RuntimeSplash, ServerFailureChoice};
-use crate::overlays::{ActionCenterOverlay, WindowSwitcherOverlay};
+use crate::overlays::{ActionCenterOverlay, ActionCenterTileAction, WindowSwitcherOverlay};
 use crate::taskbar::{SebTaskbar, TaskbarAction};
+use base64::Engine;
 use gtk::prelude::*;
 use seb_config::loader::{
     apply_browser_resource_profile, apply_start_url_query_from_resource, load_from_resource,
@@ -14,8 +15,8 @@ use seb_config::loader::{
 use seb_config::settings::{
     AppSettings, ClipboardPolicy, ConfigurationMode, KioskMode, ProctoringImageFormat,
     ProctoringImageQuantization, ProxyPolicy, ProxyProtocol, ServicePolicy, SessionConfiguration,
-    SessionMode, VirtualMachinePolicy, SEB_APPLICATION_VERSION, SEB_COMPATIBILITY_BUILD_VERSION,
-    SEB_COMPATIBILITY_VERSION,
+    SessionMode, UserInterfaceMode, VirtualMachinePolicy, SEB_APPLICATION_VERSION,
+    SEB_COMPATIBILITY_BUILD_VERSION, SEB_COMPATIBILITY_VERSION,
 };
 use seb_config::{compute_browser_exam_key, sha256_hex};
 use seb_filter::{download_url, is_configuration_resource};
@@ -59,6 +60,7 @@ type ArcServer = Arc<Mutex<SebServerClient>>;
 struct PendingServerEvents {
     logs: VecDeque<(String, String)>,
     confirmations: VecDeque<String>,
+    user_identifier: Option<String>,
     battery: Option<(i32, bool)>,
     wireless: Option<Option<i32>>,
 }
@@ -70,6 +72,7 @@ fn drain_pending_server_events(srv: &ArcServer, queue: &Arc<Mutex<PendingServerE
         };
         if q.logs.is_empty()
             && q.confirmations.is_empty()
+            && q.user_identifier.is_none()
             && q.battery.is_none()
             && q.wireless.is_none()
         {
@@ -80,6 +83,9 @@ fn drain_pending_server_events(srv: &ArcServer, queue: &Arc<Mutex<PendingServerE
     if let Ok(mut guard) = srv.lock() {
         for token in drained.confirmations {
             guard.enqueue_confirmation(&token);
+        }
+        if let Some(ref uid) = drained.user_identifier {
+            let _ = guard.send_user_identifier(uid);
         }
         if let Some((pct, connected)) = drained.battery {
             guard.report_battery(pct, connected);
@@ -104,11 +110,15 @@ pub struct SebAppShell {
     config: RefCell<SessionConfiguration>,
     current_admin_password_hash: RefCell<String>,
     panes: RefCell<Vec<Rc<BrowserPane>>>,
+    pane_mru_order: RefCell<Vec<u64>>,
     next_pane_id: Cell<u64>,
     active_pane_id: Cell<u64>,
     taskbar: RefCell<Option<Rc<SebTaskbar>>>,
     action_center: RefCell<Option<Rc<ActionCenterOverlay>>>,
     switcher: Rc<WindowSwitcherOverlay>,
+    switcher_origin_pane_id: Cell<Option<u64>>,
+    switcher_peeked_minimized_id: Cell<Option<u64>>,
+    switcher_peek_gen: Cell<u64>,
     platform: Rc<PlatformMonitor>,
     clipboard: Rc<IsolatedClipboard>,
     app_manager: Rc<RefCell<ApplicationManager>>,
@@ -129,11 +139,15 @@ pub struct SebAppShell {
     pending_server_events: Arc<Mutex<PendingServerEvents>>,
     server_wake_tx: RefCell<Option<mpsc::Sender<()>>>,
     server_ping_stop: RefCell<Option<Arc<AtomicBool>>>,
+    last_detected_user_id: RefCell<String>,
+    last_moodle_cookie_checked: RefCell<String>,
+    live_proctoring_pane_id: Cell<Option<u64>>,
     last_battery_reported: Cell<Option<(i32, bool)>>,
-    logs: RefCell<Vec<String>>,
+    logs: Rc<RefCell<Vec<String>>>,
     strict_lockdown: Cell<bool>,
     dev_bypass: Cell<bool>,
     shutting_down: Cell<bool>,
+    violation_dialog_active: Cell<bool>,
     reconfig_in_progress: Cell<bool>,
     quit_prompt_active: Cell<bool>,
     hand_raised: Cell<bool>,
@@ -397,11 +411,15 @@ impl SebAppShell {
             config: RefCell::new(session_cfg),
             current_admin_password_hash: RefCell::new(current_admin_hash),
             panes: RefCell::new(Vec::new()),
+            pane_mru_order: RefCell::new(Vec::new()),
             next_pane_id: Cell::new(1),
             active_pane_id: Cell::new(0),
             taskbar: RefCell::new(None),
             action_center: RefCell::new(None),
             switcher,
+            switcher_origin_pane_id: Cell::new(None),
+            switcher_peeked_minimized_id: Cell::new(None),
+            switcher_peek_gen: Cell::new(0),
             platform,
             clipboard,
             app_manager,
@@ -422,11 +440,15 @@ impl SebAppShell {
             pending_server_events: Arc::new(Mutex::new(PendingServerEvents::default())),
             server_wake_tx: RefCell::new(None),
             server_ping_stop: RefCell::new(None),
+            last_detected_user_id: RefCell::new(String::new()),
+            last_moodle_cookie_checked: RefCell::new(String::new()),
+            live_proctoring_pane_id: Cell::new(None),
             last_battery_reported: Cell::new(None),
-            logs: RefCell::new(initial_logs),
+            logs: Rc::new(RefCell::new(initial_logs)),
             strict_lockdown: Cell::new(opts.strict_lockdown),
             dev_bypass: Cell::new(opts.dev_bypass),
             shutting_down: Cell::new(false),
+            violation_dialog_active: Cell::new(false),
             reconfig_in_progress: Cell::new(false),
             quit_prompt_active: Cell::new(false),
             hand_raised: Cell::new(false),
@@ -678,7 +700,7 @@ impl SebAppShell {
                     }
                 }
                 if sh.switcher.is_visible() {
-                    sh.switcher.cancel();
+                    sh.cancel_window_switcher();
                     return glib::Propagation::Stop;
                 }
                 if let Some(p) = sh.active_pane() {
@@ -880,16 +902,36 @@ impl SebAppShell {
         // Cancel any active downloads & terminate previous external apps
         self.cancel_all_downloads();
         self.app_manager.borrow_mut().terminate_all();
+        dialogs::close_live_log_viewer();
+
+        self.switcher.cancel();
+        self.switcher_origin_pane_id.set(None);
+        self.switcher_peeked_minimized_id.set(None);
+        self.live_proctoring_pane_id.set(None);
+        self.hand_raised.set(false);
+        self.snap_preview.hide();
+        self.lock_screen.hide();
+        self.workspace.set_sensitive(true);
 
         for pane in self.panes.borrow_mut().drain(..) {
             self.workspace.remove(&pane.root);
+            unsafe {
+                pane.root.destroy();
+            }
         }
+        self.pane_mru_order.borrow_mut().clear();
         if let Some(tb) = self.taskbar.borrow_mut().take() {
             tb.remove_overlay(&self.window_overlay);
             self.outer_box.remove(&tb.root);
+            unsafe {
+                tb.root.destroy();
+            }
         }
         if let Some(ac) = self.action_center.borrow_mut().take() {
             self.window_overlay.remove(&ac.root);
+            unsafe {
+                ac.root.destroy();
+            }
         }
         if let Some(proc_client) = self.proctoring.borrow_mut().take() {
             proc_client.stop();
@@ -897,6 +939,14 @@ impl SebAppShell {
 
         let cfg = self.config.borrow().clone();
         let settings = &cfg.settings;
+
+        // Apply Desktop vs Mobile/Touch UI mode CSS class
+        let win_ctx = self.window.style_context();
+        if settings.user_interface.mode == UserInterfaceMode::Mobile {
+            win_ctx.add_class("seb-mobile");
+        } else {
+            win_ctx.remove_class("seb-mobile");
+        }
 
         // Apply clipboard policy & clear OS clipboards if restricted
         self.clipboard.set_policy(settings.security.clipboard_policy);
@@ -948,11 +998,12 @@ impl SebAppShell {
                     TaskbarAction::CloseWindow(id) => sh.close_pane(id),
                     TaskbarAction::ShowAbout => sh.show_about(),
                     TaskbarAction::ShowLog => {
-                        dialogs::show_log_viewer(Some(&sh.window), &sh.logs.borrow());
+                        dialogs::show_live_log_viewer(Some(&sh.window), Rc::clone(&sh.logs));
                     }
                     TaskbarAction::ShowVerificator => sh.show_verificator(),
                     TaskbarAction::RaiseHand(msg) => sh.handle_raise_hand(&msg),
                     TaskbarAction::LowerHand => sh.handle_lower_hand(),
+                    TaskbarAction::ToggleOnScreenKeyboard => sh.toggle_on_screen_keyboard(),
                     TaskbarAction::RequestQuit => sh.request_quit(None, false),
                 }),
             );
@@ -961,19 +1012,114 @@ impl SebAppShell {
             *self.taskbar.borrow_mut() = Some(tb);
         }
 
-        // Build Action Center sidebar overlay (with click-outside scrim!)
+        // Build Action Center sidebar overlay (with click-outside scrim & taskbar-parity popups!)
         if settings.user_interface.action_center.enable_action_center {
-            let sh_about = Rc::clone(self);
-            let sh_log = Rc::clone(self);
-            let sh_quit = Rc::clone(self);
+            let sh = Rc::clone(self);
             let ac = ActionCenterOverlay::new(
                 settings,
                 Rc::clone(&self.platform),
-                Rc::new(move || sh_about.show_about()),
-                Rc::new(move || {
-                    dialogs::show_log_viewer(Some(&sh_log.window), &sh_log.logs.borrow());
+                Rc::new(move |act| match act {
+                    ActionCenterTileAction::About => sh.show_about(),
+                    ActionCenterTileAction::Log => {
+                        dialogs::show_live_log_viewer(Some(&sh.window), Rc::clone(&sh.logs));
+                    }
+                    ActionCenterTileAction::Network => {
+                        let tb_opt = sh.taskbar.borrow().clone();
+                        if let Some(tb) = tb_opt {
+                            tb.open_network_popup(&sh.platform);
+                        }
+                    }
+                    ActionCenterTileAction::Audio => {
+                        let tb_opt = sh.taskbar.borrow().clone();
+                        let opened = tb_opt
+                            .as_ref()
+                            .is_some_and(|tb| tb.open_audio_popup(&sh.platform));
+                        if !opened {
+                            let st = sh.platform.snapshot().audio;
+                            if st.available {
+                                let next_muted = !st.muted;
+                                seb_platform::set_audio_muted(next_muted);
+                                sh.platform.update_audio_cached(Some(next_muted), None);
+                            }
+                        }
+                    }
+                    ActionCenterTileAction::Battery => {
+                        let tb_opt = sh.taskbar.borrow().clone();
+                        let opened = tb_opt.as_ref().is_some_and(|tb| tb.open_battery_popup());
+                        if !opened {
+                            let bat = sh.platform.snapshot().battery;
+                            if bat.available {
+                                let msg = if bat.charging {
+                                    format!("Charging: {}%", bat.percentage)
+                                } else {
+                                    format!("Battery remaining: {}%", bat.percentage)
+                                };
+                                dialogs::show_message(Some(&sh.window), "Battery", &msg, false);
+                            }
+                        }
+                    }
+                    ActionCenterTileAction::Keyboard => {
+                        let tb_opt = sh.taskbar.borrow().clone();
+                        let opened = tb_opt
+                            .as_ref()
+                            .is_some_and(|tb| tb.open_keyboard_popup(&sh.platform));
+                        if !opened {
+                            let kb = sh.platform.snapshot().keyboard;
+                            if kb.available_layouts.len() > 1 {
+                                let cur = kb
+                                    .available_layouts
+                                    .iter()
+                                    .position(|l| l.eq_ignore_ascii_case(&kb.current_short_name))
+                                    .unwrap_or(0);
+                                let next = (cur + 1) % kb.available_layouts.len();
+                                let next_code = &kb.available_layouts[next];
+                                if seb_platform::switch_keyboard_layout(next_code, next) {
+                                    sh.platform.update_keyboard_cached(next_code);
+                                }
+                            }
+                        }
+                    }
+                    ActionCenterTileAction::RaiseHand => {
+                        if sh.hand_raised.get() {
+                            sh.handle_lower_hand();
+                        } else {
+                            let force_msg = sh.config.borrow().settings.server.force_raise_hand_message;
+                            if let Some(msg) = dialogs::prompt_text(
+                                Some(&sh.window),
+                                "Raise Hand",
+                                if force_msg {
+                                    "Enter a message for your invigilator (required):"
+                                } else {
+                                    "Optional message for your invigilator:"
+                                },
+                                "",
+                            ) {
+                                if !force_msg || !msg.trim().is_empty() {
+                                    sh.handle_raise_hand(&msg);
+                                }
+                            }
+                        }
+                    }
+                    ActionCenterTileAction::Proctoring => {
+                        let status_opt = sh
+                            .proctoring
+                            .borrow()
+                            .as_ref()
+                            .map(|p| p.snapshot().1);
+                        if let Some(status) = status_opt {
+                            dialogs::show_message(
+                                Some(&sh.window),
+                                "Screen Proctoring",
+                                &status,
+                                false,
+                            );
+                        }
+                    }
+                    ActionCenterTileAction::OnScreenKeyboard => {
+                        sh.toggle_on_screen_keyboard();
+                    }
+                    ActionCenterTileAction::Quit => sh.request_quit(None, false),
                 }),
-                Rc::new(move || sh_quit.request_quit(None, false)),
             );
             self.window_overlay.add_overlay(&ac.root);
             *self.action_center.borrow_mut() = Some(ac);
@@ -1099,6 +1245,15 @@ impl SebAppShell {
             ctx.set_spell_checking_languages(&[bcp47.as_str()]);
         }
 
+        // Enable WebKitGTK favicon database so sidebar & Alt+Tab cards show each webpage's favicon
+        if let Some(ref dir) = active_profile_dir {
+            let fav_dir = dir.join("favicons");
+            let _ = fs::create_dir_all(&fav_dir);
+            ctx.set_favicon_database_directory(Some(&fav_dir.to_string_lossy()));
+        } else {
+            ctx.set_favicon_database_directory(None);
+        }
+
         // Wire Pure Rust WebKitGTK Web Extension for per-request SEB headers & subresource filter!
         if let Some(ext_dir) = resolve_web_extension_dir() {
             let init_payload = serde_json::json!({
@@ -1142,9 +1297,11 @@ impl SebAppShell {
         self.active_downloads.borrow_mut().push(download.clone());
         self.log_to_server(&format!("Browser download requested: {req_uri}"), "INFO");
 
+        let failed = Rc::new(Cell::new(false));
         let sh_dest = Rc::clone(self);
         let req_uri_c = req_uri.clone();
         let dl_c = download.clone();
+        let failed_dest = Rc::clone(&failed);
 
         download.connect_decide_destination(move |dl, suggested| {
             let mime = dl
@@ -1177,6 +1334,7 @@ impl SebAppShell {
                 if !settings.browser.allow_configuration_downloads
                     || !sh_dest.is_reconfiguration_allowed(&req_uri_c)
                 {
+                    failed_dest.set(true);
                     dl.cancel();
                     return true;
                 }
@@ -1194,7 +1352,13 @@ impl SebAppShell {
                 let path_fin = target_path.clone();
                 let dir_fin = cfg_dir.clone();
                 let source_url_fin = req_uri_c.clone();
-                dl.connect_finished(move |_| {
+                let failed_fin = Rc::clone(&failed_dest);
+                dl.connect_finished(move |d| {
+                    sh_fin.active_downloads.borrow_mut().retain(|x| x != d);
+                    if failed_fin.get() {
+                        let _ = fs::remove_file(&path_fin);
+                        return;
+                    }
                     // Verify canonical containment inside temp config dir + `.seb` extension!
                     if let (Ok(canon_file), Ok(canon_dir)) =
                         (fs::canonicalize(&path_fin), fs::canonicalize(&dir_fin))
@@ -1215,6 +1379,7 @@ impl SebAppShell {
 
             // Regular non-.seb download
             if !settings.browser.allow_downloads {
+                failed_dest.set(true);
                 dl.cancel();
                 return true;
             }
@@ -1229,6 +1394,7 @@ impl SebAppShell {
                 ) {
                     Some(p) => p,
                     None => {
+                        failed_dest.set(true);
                         dl.cancel();
                         return true;
                     }
@@ -1240,14 +1406,21 @@ impl SebAppShell {
             dl.set_destination(&format!("file://{}", dest_path.to_string_lossy()));
             let sh_fin = Rc::clone(&sh_dest);
             let p_str = dest_path.to_string_lossy().to_string();
-            dl.connect_finished(move |_| {
-                sh_fin.log_to_server(&format!("Browser download completed: {p_str}"), "INFO");
+            let failed_fin = Rc::clone(&failed_dest);
+            dl.connect_finished(move |d| {
+                sh_fin.active_downloads.borrow_mut().retain(|x| x != d);
+                if !failed_fin.get() {
+                    sh_fin.log_to_server(&format!("Browser download completed: {p_str}"), "INFO");
+                }
             });
             true
         });
 
         let sh_fail = Rc::clone(self);
-        dl_c.connect_failed(move |_, err| {
+        let failed_cb = Rc::clone(&failed);
+        dl_c.connect_failed(move |d, err| {
+            failed_cb.set(true);
+            sh_fail.active_downloads.borrow_mut().retain(|x| x != d);
             sh_fail.log_to_server(&format!("Browser download failed: {err}"), "WARNING");
         });
     }
@@ -1365,6 +1538,13 @@ impl SebAppShell {
                 PaneAction::Minimize(pid) => sh.minimize_pane(pid),
                 PaneAction::TitleOrUrlChanged { id: pid, title } => {
                     sh.sync_taskbar_windows();
+                    if let Some(ref ac) = *sh.action_center.borrow() {
+                        if ac.is_visible() {
+                            let panes = sh.panes.borrow().clone();
+                            let sh_f = Rc::clone(&sh);
+                            ac.refresh_windows(&panes, Rc::new(move |id| sh_f.focus_pane(id)));
+                        }
+                    }
                     if pid == sh.active_pane_id.get() {
                         sh.notify_proctoring_user_action(&format!("Browser navigated: {title}"));
                     }
@@ -1399,6 +1579,15 @@ impl SebAppShell {
                         p.sync_isolated_clipboard(&cid, &b64);
                     }
                 }
+                PaneAction::LmsUserIdentifierDetected(uid) => {
+                    sh.report_lms_user_identifier(&uid);
+                }
+                PaneAction::PageLoaded { url } => {
+                    sh.detect_lms_user_identifier_from_cookies(&url);
+                }
+                PaneAction::OpenPdfInline { pane_id, url } => {
+                    sh.open_pdf_inline(pane_id, &url);
+                }
                 PaneAction::Log(msg) => {
                     eprintln!("{msg}");
                     sh.logs.borrow_mut().push(msg);
@@ -1426,6 +1615,7 @@ impl SebAppShell {
         pane.root.show_all();
         self.panes.borrow_mut().push(pane);
         self.active_pane_id.set(id);
+        self.touch_pane_mru(id);
         self.sync_taskbar_windows();
         self.log_to_server("Browser window opened", "INFO");
     }
@@ -1459,7 +1649,11 @@ impl SebAppShell {
             return;
         }
         let res_str = path.to_string_lossy().to_string();
-        let splash = RuntimeSplash::show(SEB_APPLICATION_VERSION, "Reconfiguring Safe Exam Browser...");
+        let splash = RuntimeSplash::show_over(
+            Some(&self.window),
+            SEB_APPLICATION_VERSION,
+            "Reconfiguring Safe Exam Browser...",
+        );
         let client_admin_hash = self.current_admin_password_hash.borrow().clone();
         let session_admin_hash = {
             let h = self.config.borrow().settings.security.admin_password_hash.clone();
@@ -1542,11 +1736,12 @@ impl SebAppShell {
                 }
 
                 if !self.dev_bypass.get() {
-                    if let Err(e) = validate_runtime_security(
+                    let sec_check = validate_runtime_security(
                         &next_cfg,
                         &mut self.integrity_store.borrow_mut(),
                         self.strict_lockdown.get(),
-                    ) {
+                    );
+                    if let Err(e) = sec_check {
                         splash.close();
                         self.reconfig_in_progress.set(false);
                         dialogs::show_message(Some(&self.window), "Security Check Failed", &e, true);
@@ -1604,10 +1799,13 @@ impl SebAppShell {
                 }
                 *self.config.borrow_mut() = next_cfg;
                 *self.server_client.borrow_mut() = next_server.clone();
+                splash.set_status("Applying new exam configuration...");
                 // NOTE: Rebuilding WebContext is needed so WebExtension gets the new ConfigKey/BEK!
                 // When transitioning from Moodle SSO login, copy/preserve session if persistent,
                 // or build fresh WebContext with new ConfigKey/BEK extension data.
                 self.apply_current_session(was_browser_resource);
+                splash.bring_to_front();
+                splash.set_status("Starting exam session...");
                 if let Some(srv) = next_server {
                     if let Ok(mut q) = self.pending_server_events.lock() {
                         q.logs.push_back((
@@ -1617,7 +1815,7 @@ impl SebAppShell {
                     }
                     self.start_server_ping_thread(srv);
                 }
-                splash.close();
+                splash.finish_min_duration(600);
             }
             Ok(LoadOutcome::OpenInBrowser(url)) => {
                 splash.close();
@@ -1644,15 +1842,26 @@ impl SebAppShell {
     }
 
     fn focus_pane(&self, id: u64) {
+        let was_peeking = self.switcher_origin_pane_id.take().is_some();
+        if let Some(min_id) = self.switcher_peeked_minimized_id.take() {
+            if min_id != id {
+                if let Some(min_pane) = self.panes.borrow().iter().find(|p| p.id == min_id) {
+                    if min_pane.minimized.get() {
+                        min_pane.root.hide();
+                    }
+                }
+            }
+        }
         let target = self.panes.borrow().iter().find(|p| p.id == id).cloned();
         if let Some(pane) = target {
             let changed = self.active_pane_id.get() != id;
             self.active_pane_id.set(id);
+            self.touch_pane_mru(id);
             let was_min = pane.minimized.get();
             pane.set_minimized(false);
             // Raise pane's own GdkWindow without removing/re-adding from gtk::Layout,
             // preserving active titlebar drag & resize pointer grabs when switching windows.
-            if changed && self.panes.borrow().len() > 1 {
+            if (changed || was_min || was_peeking) && self.panes.borrow().len() > 1 {
                 if let Some(gw) = pane.root.window() {
                     gw.raise();
                 }
@@ -1662,6 +1871,118 @@ impl SebAppShell {
             }
             if changed || was_min {
                 pane.web_view.grab_focus();
+            }
+        }
+        self.raise_floating_proctoring();
+    }
+
+    fn touch_pane_mru(&self, id: u64) {
+        let mut mru = self.pane_mru_order.borrow_mut();
+        mru.retain(|&x| x != id);
+        mru.insert(0, id);
+    }
+
+    /// Returns all open panes ordered by Most Recently Used (last-used first) for Alt+Tab.
+    fn panes_in_mru_order(&self) -> Vec<Rc<BrowserPane>> {
+        let panes = self.panes.borrow();
+        let mru = self.pane_mru_order.borrow();
+        let mut ordered = Vec::with_capacity(panes.len());
+        for &id in mru.iter() {
+            if let Some(p) = panes.iter().find(|p| p.id == id) {
+                ordered.push(Rc::clone(p));
+            }
+        }
+        for p in panes.iter() {
+            if !ordered.iter().any(|o| o.id == p.id) {
+                ordered.push(Rc::clone(p));
+            }
+        }
+        ordered
+    }
+
+    fn raise_floating_proctoring(&self) {
+        if let Some(pid) = self.live_proctoring_pane_id.get() {
+            if let Some(pp) = self.panes.borrow().iter().find(|p| p.id == pid) {
+                if !pp.minimized.get() {
+                    if let Some(gw) = pp.root.window() {
+                        gw.raise();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Debounced live window peek (140ms delay between window switches while Alt+Tab is held)
+    /// so rapid Tab cycling stays smooth and only raises the window the user pauses on.
+    fn schedule_peek_pane(self: &Rc<Self>, id: u64) {
+        let next_gen = self.switcher_peek_gen.get().wrapping_add(1);
+        self.switcher_peek_gen.set(next_gen);
+        let sh = Rc::clone(self);
+        glib::timeout_add_local_once(Duration::from_millis(140), move || {
+            if sh.switcher_peek_gen.get() == next_gen && sh.switcher.is_visible() {
+                sh.peek_pane(id);
+            }
+        });
+    }
+
+    /// Temporarily bring the candidate window highlighted in Alt+Tab to the front
+    /// behind the switcher overlay (live window peek) without committing focus or
+    /// permanently unminimizing it until Alt is released.
+    fn peek_pane(&self, id: u64) {
+        if self.switcher_origin_pane_id.get().is_none() {
+            self.switcher_origin_pane_id
+                .set(Some(self.active_pane_id.get()));
+        }
+        if let Some(prev_min_id) = self.switcher_peeked_minimized_id.get() {
+            if prev_min_id != id {
+                if let Some(prev_pane) = self.panes.borrow().iter().find(|p| p.id == prev_min_id) {
+                    if prev_pane.minimized.get() {
+                        prev_pane.root.hide();
+                    }
+                }
+                self.switcher_peeked_minimized_id.set(None);
+            }
+        }
+        let target = self.panes.borrow().iter().find(|p| p.id == id).cloned();
+        if let Some(pane) = target {
+            if pane.minimized.get() {
+                pane.root.show();
+                self.switcher_peeked_minimized_id.set(Some(id));
+            }
+            if let Some(gw) = pane.root.window() {
+                gw.raise();
+            }
+        }
+    }
+
+    fn commit_window_switcher(&self) {
+        self.switcher_peek_gen
+            .set(self.switcher_peek_gen.get().wrapping_add(1));
+        if let Some(id) = self.switcher.commit() {
+            self.focus_pane(id);
+        } else {
+            self.cancel_window_switcher();
+        }
+    }
+
+    fn cancel_window_switcher(&self) {
+        self.switcher_peek_gen
+            .set(self.switcher_peek_gen.get().wrapping_add(1));
+        self.switcher.cancel();
+        if let Some(min_id) = self.switcher_peeked_minimized_id.take() {
+            if let Some(min_pane) = self.panes.borrow().iter().find(|p| p.id == min_id) {
+                if min_pane.minimized.get() {
+                    min_pane.root.hide();
+                }
+            }
+        }
+        if let Some(orig_id) = self.switcher_origin_pane_id.take() {
+            if let Some(orig_pane) = self.panes.borrow().iter().find(|p| p.id == orig_id) {
+                if !orig_pane.minimized.get() {
+                    if let Some(gw) = orig_pane.root.window() {
+                        gw.raise();
+                    }
+                }
             }
         }
     }
@@ -1677,12 +1998,28 @@ impl SebAppShell {
         if let Some(idx) = panes.iter().position(|p| p.id == id && !p.is_main) {
             let removed = panes.remove(idx);
             self.workspace.remove(&removed.root);
-            if self.active_pane_id.get() == id {
-                if let Some(last) = panes.last() {
-                    self.active_pane_id.set(last.id);
-                }
+            unsafe {
+                removed.root.destroy();
             }
+            if self.live_proctoring_pane_id.get() == Some(id) {
+                self.live_proctoring_pane_id.set(None);
+            }
+            self.pane_mru_order.borrow_mut().retain(|&x| x != id);
+            let next_to_focus = if self.active_pane_id.get() == id {
+                let mru = self.pane_mru_order.borrow();
+                mru.iter()
+                    .copied()
+                    .find(|mid| panes.iter().any(|p| p.id == *mid && !p.minimized.get()))
+                    .or_else(|| mru.first().copied())
+                    .or_else(|| panes.iter().rev().find(|p| !p.minimized.get()).map(|p| p.id))
+                    .or_else(|| panes.last().map(|p| p.id))
+            } else {
+                None
+            };
             drop(panes);
+            if let Some(nid) = next_to_focus {
+                self.focus_pane(nid);
+            }
             self.sync_taskbar_windows();
             self.log_to_server("Browser window closed", "INFO");
         }
@@ -1746,7 +2083,7 @@ impl SebAppShell {
             return;
         }
         if self.switcher.is_visible() {
-            self.switcher.cancel();
+            self.cancel_window_switcher();
         }
         if let Some(ref ac) = *self.action_center.borrow() {
             if ac.is_visible() {
@@ -1806,29 +2143,38 @@ impl SebAppShell {
     }
 
     fn show_about(&self) {
-        let cfg = self.config.borrow();
-        let text = format!(
-            "Safe Exam Browser for Linux (100% Pure Rust)\nVersion: {}\nSEB Compatibility: {}\nConfiguration Key: {}",
-            cfg.app_config.program_build_version,
-            cfg.app_config.seb_compatibility_version,
-            if cfg.settings.browser.configuration_key.is_empty() {
-                "(none)"
-            } else {
-                &cfg.settings.browser.configuration_key
-                    [..16.min(cfg.settings.browser.configuration_key.len())]
-            }
-        );
+        let text = {
+            let cfg = self.config.borrow();
+            format!(
+                "Safe Exam Browser for Linux (Rust)\nVersion: {}\nSEB Compatibility: {}\nConfiguration Key: {}",
+                cfg.app_config.program_build_version,
+                cfg.app_config.seb_compatibility_version,
+                if cfg.settings.browser.configuration_key.is_empty() {
+                    "(none)"
+                } else {
+                    &cfg.settings.browser.configuration_key
+                        [..16.min(cfg.settings.browser.configuration_key.len())]
+                }
+            )
+        };
         dialogs::show_message(Some(&self.window), "About Safe Exam Browser", &text, false);
     }
 
     fn show_verificator(&self) {
-        let cfg = self.config.borrow();
-        let bek = compute_effective_bek(&cfg);
+        let (build_ver, compat_ver, cfg_key, bek) = {
+            let cfg = self.config.borrow();
+            (
+                cfg.app_config.program_build_version.clone(),
+                cfg.app_config.seb_compatibility_version.clone(),
+                cfg.settings.browser.configuration_key.clone(),
+                compute_effective_bek(&cfg),
+            )
+        };
         dialogs::show_verificator_dialog(
             Some(&self.window),
-            &cfg.app_config.program_build_version,
-            &cfg.app_config.seb_compatibility_version,
-            &cfg.settings.browser.configuration_key,
+            &build_ver,
+            &compat_ver,
+            &cfg_key,
             &bek,
         );
     }
@@ -1846,6 +2192,9 @@ impl SebAppShell {
             if let Some(ref tb) = *self.taskbar.borrow() {
                 tb.set_hand_raised(true);
             }
+            if let Some(ref ac) = *self.action_center.borrow() {
+                ac.set_hand_raised(true);
+            }
         }
     }
 
@@ -1861,6 +2210,9 @@ impl SebAppShell {
             self.hand_raised.set(false);
             if let Some(ref tb) = *self.taskbar.borrow() {
                 tb.set_hand_raised(false);
+            }
+            if let Some(ref ac) = *self.action_center.borrow() {
+                ac.set_hand_raised(false);
             }
         }
     }
@@ -1892,12 +2244,20 @@ impl SebAppShell {
         if sp.service_url.trim().is_empty() {
             return;
         }
+        let cache_dir = self
+            .config
+            .borrow()
+            .app_config
+            .temporary_directory
+            .join("sps-cache");
         let cfg = ProctoringClientConfig {
             service_url: sp.service_url,
             client_id: sp.client_id,
             client_secret: sp.client_secret,
             group_id: sp.group_id,
             session_id: session_id_override.unwrap_or_default(),
+            encryption_secret: sp.encryption_secret,
+            cache_dir: Some(cache_dir),
             cache_size: sp.cache_size,
             downscaling: sp.image_downscaling,
             quantization: match sp.image_quantization {
@@ -1974,12 +2334,15 @@ impl SebAppShell {
             return;
         }
 
-        let alloc = self.window.allocation();
+        let mut alloc = self.window.allocation();
         let w = alloc.width();
         let h = alloc.height();
         if w <= 0 || h <= 0 || !self.window.is_visible() {
             return;
         }
+        // Ensure GTK allocation is up-to-date before Cairo draw so GTK never emits
+        // `gtk_widget_draw: assertion '!widget->priv->alloc_needed' failed`.
+        self.window.size_allocate(&mut alloc);
         let Ok(mut surface) = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h) else {
             return;
         };
@@ -2098,16 +2461,18 @@ impl SebAppShell {
         }
 
         if let Some(reason) = violation {
-            eprintln!("[Security] {reason}");
-            self.log_to_server(&reason, "ERROR");
-            self.lockdown.borrow_mut().stop();
-            dialogs::show_message(
-                Some(&self.window),
-                "Security Violation",
-                &format!("{reason}\n\nSafe Exam Browser will now close."),
-                true,
-            );
-            self.shutdown();
+            if !self.violation_dialog_active.replace(true) {
+                eprintln!("[Security] {reason}");
+                self.log_to_server(&reason, "ERROR");
+                self.lockdown.borrow_mut().stop();
+                dialogs::show_message(
+                    Some(&self.window),
+                    "Security Violation",
+                    &format!("{reason}\n\nSafe Exam Browser will now close."),
+                    true,
+                );
+                self.shutdown();
+            }
         }
     }
 
@@ -2156,9 +2521,9 @@ impl SebAppShell {
                         }
                     }
 
-                    let panes = self.panes.borrow().clone();
+                    let panes = self.panes_in_mru_order();
                     if terminal == Some(false) {
-                        self.switcher.cancel();
+                        self.cancel_window_switcher();
                     } else if terminal == Some(true) && !self.switcher.is_visible() {
                         if !panes.is_empty() {
                             let active_id = self.active_pane_id.get();
@@ -2175,9 +2540,10 @@ impl SebAppShell {
                         let active_id = self.active_pane_id.get();
                         let count = net_steps.unsigned_abs().max(1);
                         let back = net_steps < 0;
+                        let mut selected_id = None;
                         for _ in 0..count {
                             let sh = Rc::clone(self);
-                            self.switcher.step(
+                            selected_id = self.switcher.step(
                                 back,
                                 &panes,
                                 active_id,
@@ -2185,24 +2551,43 @@ impl SebAppShell {
                             );
                         }
                         if terminal == Some(true) {
-                            if let Some(id) = self.switcher.commit() {
-                                self.focus_pane(id);
-                            }
+                            self.commit_window_switcher();
+                        } else if let Some(id) = selected_id {
+                            self.schedule_peek_pane(id);
                         }
                     }
                     idx = next_idx;
                     continue;
                 }
                 LockdownEvent::AltTabCommit => {
-                    if let Some(id) = self.switcher.commit() {
-                        self.focus_pane(id);
-                    }
+                    self.commit_window_switcher();
                 }
                 LockdownEvent::AltTabCancel => {
-                    self.switcher.cancel();
+                    self.cancel_window_switcher();
+                }
+                LockdownEvent::NavBack => {
+                    if !dialogs::is_modal_active() {
+                        if let Some(p) = self.active_pane() {
+                            p.go_back();
+                        }
+                    }
+                }
+                LockdownEvent::NavForward => {
+                    if !dialogs::is_modal_active() {
+                        if let Some(p) = self.active_pane() {
+                            p.go_forward();
+                        }
+                    }
+                }
+                LockdownEvent::NavHome => {
+                    if !dialogs::is_modal_active() {
+                        if let Some(p) = self.active_pane() {
+                            p.navigate_home();
+                        }
+                    }
                 }
                 LockdownEvent::Violation { reason, .. } => {
-                    if !self.shutting_down.get() {
+                    if !self.shutting_down.get() && !self.violation_dialog_active.replace(true) {
                         eprintln!("[AntiCheat] {reason}");
                         self.log_to_server(reason, "ERROR");
                         self.lockdown.borrow_mut().stop();
@@ -2216,7 +2601,7 @@ impl SebAppShell {
                     }
                 }
                 LockdownEvent::HelperTerminated { reason } => {
-                    if !self.shutting_down.get() {
+                    if !self.shutting_down.get() && !self.violation_dialog_active.replace(true) {
                         eprintln!("[AntiCheat] {reason}");
                         self.log_to_server(reason, "ERROR");
                         dialogs::show_message(
@@ -2348,65 +2733,93 @@ impl SebAppShell {
                                     if let Some(ref tb) = *self.taskbar.borrow() {
                                         tb.set_hand_raised(false);
                                     }
+                                    if let Some(ref ac) = *self.action_center.borrow() {
+                                        ac.set_hand_raised(false);
+                                    }
                                 }
                             }
                         }
                         3 => {
-                            // SEB_PROCTORING (provider: 3=ScreenProctoring; method: 1=Join, 2=Leave)
-                            if inst.proctoring.provider != 3 {
-                                should_confirm = false;
-                                self.log_to_server(
-                                    "Requested proctoring capability is unavailable on Linux.",
-                                    "ERROR",
-                                );
-                                self.show_server_lock_screen(
-                                    "The server requires an unsupported proctoring capability. Contact your invigilator.",
-                                );
-                            } else if inst.proctoring.method == 1 {
-                                {
-                                    let mut cfg = self.config.borrow_mut();
-                                    let sp = &mut cfg.settings.proctoring.screen_proctoring;
-                                    if !inst.proctoring.service_url.is_empty() {
-                                        sp.service_url = inst.proctoring.service_url.clone();
+                            // SEB_PROCTORING (provider: 1=JitsiMeet, 2=Zoom, 3=ScreenProctoring; method: 1=Join, 2=Leave)
+                            match inst.proctoring.provider {
+                                1 | 2 => {
+                                    if inst.proctoring.method == 1 {
+                                        {
+                                            let mut cfg = self.config.borrow_mut();
+                                            cfg.settings.proctoring.enabled = true;
+                                            cfg.settings.proctoring.allow_chat = inst.allow_chat;
+                                            cfg.settings.proctoring.receive_audio =
+                                                inst.receive_audio;
+                                            cfg.settings.proctoring.receive_video =
+                                                inst.receive_video;
+                                        }
+                                        self.start_live_proctoring(&inst.proctoring);
+                                    } else if inst.proctoring.method == 2 {
+                                        self.stop_live_proctoring();
                                     }
-                                    if !inst.proctoring.client_id.is_empty() {
-                                        sp.client_id = inst.proctoring.client_id.clone();
-                                    }
-                                    if !inst.proctoring.client_secret.is_empty() {
-                                        sp.client_secret = inst.proctoring.client_secret.clone();
-                                    }
-                                    if !inst.proctoring.group_id.is_empty() {
-                                        sp.group_id = inst.proctoring.group_id.clone();
-                                    }
-                                    if !inst.proctoring.encryption_secret.is_empty() {
-                                        sp.encryption_secret =
-                                            inst.proctoring.encryption_secret.clone();
-                                    }
-                                    sp.enabled = true;
-                                    cfg.settings.proctoring.enabled = true;
                                 }
-                                self.start_screen_proctoring(
-                                    if inst.proctoring.session_id.is_empty() {
-                                        None
-                                    } else {
-                                        Some(inst.proctoring.session_id.clone())
-                                    },
-                                );
-                            } else if inst.proctoring.method == 2 {
-                                if let Some(p) = self.proctoring.borrow_mut().take() {
-                                    p.stop();
+                                3 => {
+                                    if inst.proctoring.method == 1 {
+                                        {
+                                            let mut cfg = self.config.borrow_mut();
+                                            let sp = &mut cfg.settings.proctoring.screen_proctoring;
+                                            if !inst.proctoring.service_url.is_empty() {
+                                                sp.service_url =
+                                                    inst.proctoring.service_url.clone();
+                                            }
+                                            if !inst.proctoring.client_id.is_empty() {
+                                                sp.client_id = inst.proctoring.client_id.clone();
+                                            }
+                                            if !inst.proctoring.client_secret.is_empty() {
+                                                sp.client_secret =
+                                                    inst.proctoring.client_secret.clone();
+                                            }
+                                            if !inst.proctoring.group_id.is_empty() {
+                                                sp.group_id = inst.proctoring.group_id.clone();
+                                            }
+                                            if !inst.proctoring.encryption_secret.is_empty() {
+                                                sp.encryption_secret =
+                                                    inst.proctoring.encryption_secret.clone();
+                                            }
+                                            sp.enabled = true;
+                                            cfg.settings.proctoring.enabled = true;
+                                        }
+                                        self.start_screen_proctoring(
+                                            if inst.proctoring.session_id.is_empty() {
+                                                None
+                                            } else {
+                                                Some(inst.proctoring.session_id.clone())
+                                            },
+                                        );
+                                    } else if inst.proctoring.method == 2 {
+                                        if let Some(p) = self.proctoring.borrow_mut().take() {
+                                            p.stop();
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    should_confirm = false;
+                                    self.log_to_server(
+                                        "Received unknown SEB_PROCTORING provider.",
+                                        "WARNING",
+                                    );
                                 }
                             }
                         }
                         4 => {
-                            // SEB_RECONFIGURE_SETTINGS (unsupported proctoring capability on Linux)
-                            should_confirm = false;
+                            // SEB_RECONFIGURE_SETTINGS (runtime proctoring audio/video/chat flags)
+                            {
+                                let mut cfg = self.config.borrow_mut();
+                                cfg.settings.proctoring.allow_chat = inst.allow_chat;
+                                cfg.settings.proctoring.receive_audio = inst.receive_audio;
+                                cfg.settings.proctoring.receive_video = inst.receive_video;
+                            }
                             self.log_to_server(
-                                "Requested proctoring capability is unavailable on Linux.",
-                                "ERROR",
-                            );
-                            self.show_server_lock_screen(
-                                "The server requires an unsupported proctoring capability. Contact your invigilator.",
+                                &format!(
+                                    "Proctoring settings reconfigured (chat={}, audio={}, video={}).",
+                                    inst.allow_chat, inst.receive_audio, inst.receive_video
+                                ),
+                                "INFO",
                             );
                         }
                         _ => {}
@@ -2428,6 +2841,281 @@ impl SebAppShell {
                 q.confirmations.push_back(token.to_string());
             }
             self.wake_server_worker();
+        }
+    }
+
+    fn report_lms_user_identifier(&self, uid: &str) {
+        let clean = uid.trim();
+        if clean.is_empty() || self.server_client.borrow().is_none() {
+            return;
+        }
+        if *self.last_detected_user_id.borrow() == clean {
+            return;
+        }
+        *self.last_detected_user_id.borrow_mut() = clean.to_string();
+        if let Ok(mut q) = self.pending_server_events.lock() {
+            q.user_identifier = Some(clean.to_string());
+        }
+        self.wake_server_worker();
+    }
+
+    fn detect_lms_user_identifier_from_cookies(self: &Rc<Self>, page_url: &str) {
+        if self.server_client.borrow().is_none() {
+            return;
+        }
+        let Ok(parsed) = url::Url::parse(page_url) else {
+            return;
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return;
+        }
+        let origin = parsed.origin().ascii_serialization();
+        let Some(ctx) = self.web_context.borrow().clone() else {
+            return;
+        };
+        let Some(cm) = ctx.cookie_manager() else {
+            return;
+        };
+        let sh = Rc::clone(self);
+        let url_owned = page_url.to_string();
+        cm.cookies(&url_owned, gio::Cancellable::NONE, move |res| {
+            let Ok(cookies) = res else { return };
+            for mut cookie in cookies {
+                let name = cookie
+                    .name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let value = cookie
+                    .value()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                if value.is_empty() {
+                    continue;
+                }
+                // 1. Open edX: edx-user-info JSON cookie contains "username"
+                if name.eq_ignore_ascii_case("edx-user-info") {
+                    if let Some(uid) = parse_edx_user_info_cookie(&value) {
+                        sh.report_lms_user_identifier(&uid);
+                        return;
+                    }
+                }
+                // 2. Moodle: MoodleSession* cookie -> async lookup via Moodle sebuser/sebserver endpoint
+                if name.starts_with("MoodleSession") {
+                    let key = format!("{origin}|{name}|{value}");
+                    if *sh.last_moodle_cookie_checked.borrow() == key {
+                        continue;
+                    }
+                    *sh.last_moodle_cookie_checked.borrow_mut() = key;
+                    let origin_c = origin.clone();
+                    let name_c = name.clone();
+                    let val_c = value.clone();
+                    let queue = Arc::clone(&sh.pending_server_events);
+                    let wake_tx = sh.server_wake_tx.borrow().clone();
+                    thread::spawn(move || {
+                        if let Some(uid) =
+                            seb_server::client::lookup_moodle_user_id(&origin_c, &name_c, &val_c)
+                        {
+                            if let Ok(mut q) = queue.lock() {
+                                q.user_identifier = Some(uid);
+                            }
+                            if let Some(tx) = wake_tx {
+                                let _ = tx.send(());
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    fn start_live_proctoring(self: &Rc<Self>, data: &seb_server::ProctoringInstructionData) {
+        let Some(ctx) = self.web_context.borrow().clone() else {
+            return;
+        };
+        let target_url = match data.provider {
+            1 => {
+                // Jitsi Meet web session
+                let base = data.service_url.trim().trim_end_matches('/');
+                let room = data.room_name.trim().trim_start_matches('/');
+                if base.is_empty() || room.is_empty() {
+                    return;
+                }
+                let mut url = format!("{base}/{room}");
+                if !data.token.trim().is_empty() {
+                    url.push_str(&format!("?jwt={}", data.token.trim()));
+                }
+                let p = self.config.borrow().settings.proctoring.clone();
+                url.push_str(&format!(
+                    "#config.prejoinPageEnabled=false&config.startWithAudioMuted={}&config.startWithVideoMuted={}",
+                    !p.receive_audio, !p.receive_video
+                ));
+                url
+            }
+            2 => {
+                // Zoom Web Client fallback on Linux
+                let meeting = data.meeting_number.trim();
+                if meeting.is_empty() {
+                    return;
+                }
+                let mut url = format!("https://app.zoom.us/wc/{meeting}/join");
+                let mut sep = '?';
+                if !data.password.trim().is_empty() {
+                    url.push_str(&format!("{sep}pwd={}", data.password.trim()));
+                    sep = '&';
+                }
+                if !data.user_name.trim().is_empty() {
+                    let b64 = base64::engine::general_purpose::STANDARD
+                        .encode(data.user_name.trim().as_bytes());
+                    url.push_str(&format!("{sep}un={b64}"));
+                }
+                url
+            }
+            _ => return,
+        };
+
+        if let Some(existing_id) = self.live_proctoring_pane_id.get() {
+            if let Some(pane) = self.panes.borrow().iter().find(|p| p.id == existing_id).cloned() {
+                pane.web_view.load_uri(&target_url);
+                self.focus_pane(existing_id);
+                return;
+            }
+        }
+
+        // Spawn compact floating ProctoringWindow (4.2): no browser toolbar/address bar,
+        // positioned neatly in the bottom-right corner of the workspace.
+        let orig_additional = self.config.borrow().settings.browser.additional_window.clone();
+        {
+            let mut cfg = self.config.borrow_mut();
+            let aw = &mut cfg.settings.browser.additional_window;
+            aw.show_toolbar = false;
+            aw.allow_address_bar = false;
+            aw.show_reload_button = false;
+            aw.show_home_button = false;
+            aw.allow_backward_navigation = false;
+            aw.allow_forward_navigation = false;
+            aw.always_on_top = true;
+            aw.full_screen_mode = false;
+        }
+        self.spawn_pane(ctx, false, &target_url);
+        {
+            self.config.borrow_mut().settings.browser.additional_window = orig_additional;
+        }
+        let new_id = self.active_pane_id.get();
+        if let Some(pane) = self.panes.borrow().iter().find(|p| p.id == new_id).cloned() {
+            let ws_w = self.workspace.allocated_width().max(1024);
+            let ws_h = self.workspace.allocated_height().max(700);
+            let pw = 260;
+            let ph = 195;
+            pane.enable_floating_proctoring_mode(&self.workspace);
+            pane.set_windowed_rect(
+                &self.workspace,
+                PaneRect {
+                    x: (ws_w - pw - 16).max(12),
+                    y: (ws_h - ph - 16).max(12),
+                    w: pw,
+                    h: ph,
+                },
+                false,
+            );
+            if let Some(gw) = pane.root.window() {
+                gw.raise();
+            }
+        }
+        self.live_proctoring_pane_id.set(Some(new_id));
+        self.log_to_server("Floating live proctoring window opened.", "INFO");
+    }
+
+    fn toggle_on_screen_keyboard(&self) {
+        for candidate in ["onboard", "maliit-keyboard", "squeekboard", "florence"] {
+            if std::process::Command::new(candidate)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
+        }
+        dialogs::show_message(
+            Some(&self.window),
+            "On-Screen Keyboard",
+            "No supported Linux on-screen keyboard found (onboard, maliit-keyboard, squeekboard, or florence).",
+            false,
+        );
+    }
+
+    fn stop_live_proctoring(&self) {
+        if let Some(pid) = self.live_proctoring_pane_id.take() {
+            self.close_pane(pid);
+            self.log_to_server("Live proctoring window closed.", "INFO");
+        }
+    }
+
+    fn open_pdf_inline(self: &Rc<Self>, pane_id: u64, pdf_url: &str) {
+        let Some(pane) = self.panes.borrow().iter().find(|p| p.id == pane_id).cloned() else {
+            return;
+        };
+        let show_toolbar = self.config.borrow().settings.browser.allow_pdf_reader_toolbar;
+        let allow_print = self.config.borrow().settings.browser.allow_print;
+        let Some(ctx) = self.web_context.borrow().clone() else {
+            return;
+        };
+        // Fetch PDF with current WebKit session cookies via CookieManager, then render pages inline
+        if let Some(cm) = ctx.cookie_manager() {
+            let tmp_dir = self
+                .config
+                .borrow()
+                .app_config
+                .temporary_directory
+                .join(format!("pdf-view-{}-{}", std::process::id(), now_nanos()));
+            let _ = fs::create_dir_all(&tmp_dir);
+            let pdf_path = tmp_dir.join("document.pdf");
+            let pdf_url_owned = pdf_url.to_string();
+            cm.cookies(pdf_url, gio::Cancellable::NONE, move |res| {
+                let mut cookie_pairs = Vec::new();
+                if let Ok(cookies) = res {
+                    for mut c in cookies {
+                        if let (Some(n), Some(v)) = (c.name(), c.value()) {
+                            cookie_pairs.push(format!("{n}={v}"));
+                        }
+                    }
+                }
+                let cookie_hdr = cookie_pairs.join("; ");
+                let (tx, rx) = mpsc::channel::<Result<String, String>>();
+                let url_t = pdf_url_owned.clone();
+                let dir_t = tmp_dir.clone();
+                let pdf_t = pdf_path.clone();
+                thread::spawn(move || {
+                    let out = render_pdf_to_inline_html(
+                        &url_t,
+                        &cookie_hdr,
+                        &dir_t,
+                        &pdf_t,
+                        show_toolbar,
+                        allow_print,
+                    );
+                    let _ = tx.send(out);
+                });
+                let pane_c = Rc::clone(&pane);
+                let base_url = pdf_url_owned.clone();
+                glib::timeout_add_local(Duration::from_millis(80), move || match rx.try_recv() {
+                    Ok(Ok(html)) => {
+                        pane_c.web_view.load_html(&html, Some(&base_url));
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(err)) => {
+                        let fallback = format!(
+                            "<!doctype html><html><body style=\"font-family:sans-serif;background:#f0f0f0;color:#000;padding:24px;\"><h3>PDF Viewer</h3><p>{}</p></body></html>",
+                            html_escape(&err)
+                        );
+                        pane_c.web_view.load_html(&fallback, Some(&base_url));
+                        glib::ControlFlow::Break
+                    }
+                    Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                });
+            });
         }
     }
 
@@ -2480,13 +3168,18 @@ impl SebAppShell {
         self.lock_screen.pack_start(&spacer2, true, true, 0);
 
         let srv_opt = self.server_client.borrow().clone();
+        let ls = self.lock_screen.clone();
+        let ws = self.workspace.clone();
         confirm_btn.connect_clicked(move |b| {
             b.set_sensitive(false);
             if let Some(ref srv) = srv_opt {
                 if let Ok(mut g) = srv.lock() {
                     let _ = g.confirm_lock_screen();
+                    g.log_event("Lock screen confirmed by user", "INFO");
                 }
             }
+            ls.hide();
+            ws.set_sensitive(true);
         });
         self.lock_screen.set_no_show_all(false);
         self.lock_screen.show_all();
@@ -2510,25 +3203,30 @@ impl SebAppShell {
             }
         }
 
-        // Update taskbar indicators from non-blocking background snapshot
+        // Update taskbar & Action Center indicators from non-blocking background snapshot
+        let show_proc_btn = self
+            .config
+            .borrow()
+            .settings
+            .proctoring
+            .show_taskbar_notification;
+        let proc_snap = self.proctoring.borrow().as_ref().map(|p| p.snapshot());
         if let Some(ref tb) = *self.taskbar.borrow() {
             tb.apply_snapshot(&snap);
-            let show_btn = self
-                .config
-                .borrow()
-                .settings
-                .proctoring
-                .show_taskbar_notification;
-            if let Some(ref proc_client) = *self.proctoring.borrow() {
-                let (st, txt, _, _) = proc_client.snapshot();
-                tb.update_proctoring_status(st, &txt, show_btn);
+            if let Some((st, ref txt, _, _)) = proc_snap {
+                tb.update_proctoring_status(st, txt, show_proc_btn);
             } else {
                 tb.update_proctoring_status(ProctoringState::Inactive, "", false);
             }
         }
 
-        // Live refresh Action Center clock & system tiles while open!
+        // Live refresh Action Center clock, proctoring & system tiles while open!
         if let Some(ref ac) = *self.action_center.borrow() {
+            if let Some((st, ref txt, _, _)) = proc_snap {
+                ac.update_proctoring_status(st, txt, show_proc_btn);
+            } else {
+                ac.update_proctoring_status(ProctoringState::Inactive, "", false);
+            }
             if ac.is_visible() {
                 ac.refresh_tiles(&snap);
             }
@@ -2601,6 +3299,10 @@ impl SebAppShell {
         self.app_manager.borrow_mut().terminate_all();
 
         if let Some(p) = self.proctoring.borrow_mut().take() {
+            if p.pending_count() > 0 {
+                p.begin_flush();
+                flush_proctoring_with_dialog(&self.window, &p);
+            }
             p.stop();
         }
         if let Some(stop) = self.server_ping_stop.borrow_mut().take() {
@@ -2617,8 +3319,26 @@ impl SebAppShell {
         }
 
         // Clear browser cookies & HTTP cache on shutdown cleanly BEFORE quitting GTK main loop
+        dialogs::close_live_log_viewer();
         for pane in self.panes.borrow_mut().drain(..) {
             self.workspace.remove(&pane.root);
+            unsafe {
+                pane.root.destroy();
+            }
+        }
+        self.pane_mru_order.borrow_mut().clear();
+        if let Some(tb) = self.taskbar.borrow_mut().take() {
+            tb.remove_overlay(&self.window_overlay);
+            self.outer_box.remove(&tb.root);
+            unsafe {
+                tb.root.destroy();
+            }
+        }
+        if let Some(ac) = self.action_center.borrow_mut().take() {
+            self.window_overlay.remove(&ac.root);
+            unsafe {
+                ac.root.destroy();
+            }
         }
         let (is_browser_res, bcfg, profile_dir) = {
             let c = self.config.borrow();
@@ -2806,8 +3526,24 @@ fn run_server_workflow(
 
             splash.set_status("Retrieving available exams...");
             let hs = client.handshake("Linux", SEB_COMPATIBILITY_VERSION)?;
-            let selected = dialogs::show_exam_selector(None, &hs.exams)
-                .ok_or_else(|| "Exam selection cancelled.".to_string())?;
+            let configured_exam_id = srv_cfg.exam_id.trim();
+            let selected = if !configured_exam_id.is_empty() {
+                hs.exams
+                    .iter()
+                    .find(|e| e.id == configured_exam_id)
+                    .cloned()
+                    .or_else(|| {
+                        if hs.exams.len() == 1 {
+                            hs.exams.first().cloned()
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            }
+            .or_else(|| dialogs::show_exam_selector(None, &hs.exams))
+            .ok_or_else(|| "Exam selection cancelled.".to_string())?;
 
             splash.set_status("Downloading exam configuration...");
             let raw = client.fetch_exam_configuration(&selected.id)?;
@@ -3305,4 +4041,175 @@ impl Drop for SebAppShell {
         self.power_inhibitor.borrow_mut().stop();
         self.lockdown.borrow_mut().stop();
     }
+}
+
+fn parse_edx_user_info_cookie(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('"');
+    // Unescape common cookie quoting (\054 -> , and \" -> ")
+    let unescaped = trimmed.replace("\\054", ",").replace("\\\"", "\"");
+    let v: serde_json::Value = serde_json::from_str(&unescaped).ok()?;
+    v.get("username")
+        .and_then(|u| u.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn render_pdf_to_inline_html(
+    pdf_url: &str,
+    cookie_hdr: &str,
+    tmp_dir: &Path,
+    pdf_path: &Path,
+    show_toolbar: bool,
+    allow_print: bool,
+) -> Result<String, String> {
+    struct TempDirCleanup(PathBuf);
+    impl Drop for TempDirCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = TempDirCleanup(tmp_dir.to_path_buf());
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(20))
+        .build();
+    let mut req = agent.get(pdf_url);
+    if !cookie_hdr.is_empty() {
+        req = req.set("Cookie", cookie_hdr);
+    }
+    let resp = req
+        .call()
+        .map_err(|e| format!("Failed to fetch PDF document: {e}"))?;
+    let mut bytes = Vec::new();
+    use std::io::Read as _;
+    resp.into_reader()
+        .take(64 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read PDF document: {e}"))?;
+    fs::write(pdf_path, &bytes).map_err(|e| format!("Failed to store temporary PDF: {e}"))?;
+
+    let prefix = tmp_dir.join("page");
+    let status = std::process::Command::new("pdftoppm")
+        .args(["-png", "-r", "130"])
+        .arg(pdf_path)
+        .arg(&prefix)
+        .status()
+        .map_err(|_| {
+            "Inline PDF rendering requires 'pdftoppm' (poppler-utils), which is not installed."
+                .to_string()
+        })?;
+    if !status.success() {
+        return Err("Failed to render PDF pages with pdftoppm.".to_string());
+    }
+
+    let mut pages: Vec<PathBuf> = fs::read_dir(tmp_dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok().map(|x| x.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("page-") && n.ends_with(".png"))
+        })
+        .collect();
+    pages.sort();
+    if pages.is_empty() {
+        return Err("PDF document contained no renderable pages.".to_string());
+    }
+
+    let mut imgs = String::new();
+    for (idx, p) in pages.iter().enumerate() {
+        if let Ok(png) = fs::read(p) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+            imgs.push_str(&format!(
+                "<div class=\"pg\" id=\"p{}\"><img src=\"data:image/png;base64,{}\"/></div>",
+                idx + 1,
+                b64
+            ));
+        }
+    }
+    let _ = fs::remove_dir_all(tmp_dir);
+
+    let toolbar = if show_toolbar {
+        let print_btn = if allow_print {
+            "<button onclick=\"window.print()\">Print</button>"
+        } else {
+            ""
+        };
+        format!(
+            "<div class=\"tb\"><span>PDF Viewer ({} pages)</span><div><button onclick=\"z(0.85)\">-</button><button onclick=\"z(1.18)\">+</button>{print_btn}</div></div>",
+            pages.len()
+        )
+    } else {
+        String::new()
+    };
+
+    Ok(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#d8d8d8;font-family:sans-serif;}}.tb{{position:sticky;top:0;background:#f0f0f0;border-bottom:1px solid #b0b0b0;padding:6px 12px;display:flex;justify-content:space-between;align-items:center;}}button{{background:#f0f0f0;border:1px solid gray;padding:3px 10px;margin-left:6px;cursor:pointer;}}.pg{{text-align:center;margin:12px auto;}}img{{width:94%;box-shadow:0 1px 4px rgba(0,0,0,0.25);background:#fff;}}</style><script>var s=1;function z(f){{s=Math.max(0.4,Math.min(3,s*f));document.querySelectorAll('img').forEach(i=>i.style.width=(s*94)+'%');}}</script></head><body>{toolbar}{imgs}</body></html>"
+    ))
+}
+
+fn flush_proctoring_with_dialog(parent: &gtk::Window, client: &ScreenProctoringClient) {
+    let initial = client.pending_count();
+    if initial == 0 {
+        return;
+    }
+    let dlg = gtk::Dialog::new();
+    dlg.set_transient_for(Some(parent));
+    dlg.set_modal(true);
+    dlg.set_title("Screen Proctoring");
+    dlg.set_default_size(400, 140);
+    dlg.style_context().add_class("seb-dialog");
+    dialogs::make_window_frameless(&dlg);
+
+    let content = dlg.content_area();
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(14);
+    vbox.set_margin_start(18);
+    vbox.set_margin_end(18);
+
+    let lbl = gtk::Label::new(Some(&format!(
+        "Uploading remaining Screen Proctoring data ({initial} queued)..."
+    )));
+    lbl.set_xalign(0.0);
+    let pb = gtk::ProgressBar::new();
+    pb.set_fraction(0.0);
+    let force_btn = gtk::Button::with_label("Force Quit");
+    force_btn.set_halign(gtk::Align::End);
+    let force_quit = Rc::new(Cell::new(false));
+    {
+        let fq = Rc::clone(&force_quit);
+        force_btn.connect_clicked(move |_| fq.set(true));
+    }
+
+    vbox.pack_start(&lbl, false, false, 0);
+    vbox.pack_start(&pb, false, false, 0);
+    vbox.pack_start(&force_btn, false, false, 4);
+    content.pack_start(&vbox, true, true, 0);
+    dlg.show_all();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !force_quit.get() && Instant::now() < deadline {
+        let rem = client.pending_count();
+        if rem == 0 {
+            break;
+        }
+        let done = initial.saturating_sub(rem);
+        pb.set_fraction((done as f64 / initial.max(1) as f64).clamp(0.0, 1.0));
+        lbl.set_text(&format!(
+            "Uploading remaining Screen Proctoring data ({rem} remaining)..."
+        ));
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    dlg.close();
 }

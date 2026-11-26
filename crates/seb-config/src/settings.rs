@@ -4,7 +4,7 @@ use seb_security::VersionRestriction;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const SEB_APPLICATION_VERSION: &str = "0.6.1";
+pub const SEB_APPLICATION_VERSION: &str = "0.6.2";
 pub const SEB_COMPATIBILITY_VERSION: &str = "3.10.2";
 pub const SEB_COMPATIBILITY_BUILD_VERSION: &str = "3.10.2.0";
 
@@ -588,6 +588,9 @@ pub struct ProctoringSettings {
     pub enabled: bool,
     pub show_disclaimer: bool,
     pub show_taskbar_notification: bool,
+    pub allow_chat: bool,
+    pub receive_audio: bool,
+    pub receive_video: bool,
     pub screen_proctoring: ScreenProctoringSettings,
 }
 
@@ -597,6 +600,9 @@ impl Default for ProctoringSettings {
             enabled: false,
             show_disclaimer: true,
             show_taskbar_notification: true,
+            allow_chat: false,
+            receive_audio: false,
+            receive_video: false,
             screen_proctoring: ScreenProctoringSettings::default(),
         }
     }

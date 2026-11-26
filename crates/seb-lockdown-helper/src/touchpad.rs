@@ -36,6 +36,7 @@ pub const BTN_TOOL_DOUBLETAP: u16 = 0x14d;
 pub const BTN_TOOL_TRIPLETAP: u16 = 0x14e;
 pub const BTN_TOOL_QUADTAP: u16 = 0x14f;
 const SYN_REPORT: u16 = 0;
+const SYN_DROPPED: u16 = 3;
 
 const BUS_USB: u16 = 0x03;
 
@@ -168,6 +169,16 @@ impl TouchpadFilterState {
                 out.push((EV_SYN, SYN_REPORT, 0));
                 out
             }
+            EV_SYN if ev.code == SYN_DROPPED => {
+                // Kernel ring-buffer overrun during heavy touchpad spam: discard partial frame
+                // and reset multi-finger state (including hw_double) instead of forwarding raw SYN_DROPPED.
+                self.frame_events.clear();
+                self.hw_double = false;
+                self.hw_triple = false;
+                self.hw_quad = false;
+                self.hw_quint = false;
+                Vec::new()
+            }
             EV_SYN => vec![(ev.type_, ev.code, ev.value)],
             _ => Vec::new(),
         }
@@ -175,6 +186,7 @@ impl TouchpadFilterState {
 }
 
 struct GrabbedTouchpad {
+    event_name: String,
     phys_fd: RawFd,
     uinput_fd: RawFd,
     filter: TouchpadFilterState,
@@ -260,7 +272,23 @@ impl TouchpadBlocker {
                         }
                         continue;
                     }
+                    // Drain any pre-grab events buffered during the 80ms udev settle sleep
+                    let mut drain_buf = [InputEvent::default(); 64];
+                    let drain_bytes = drain_buf.len() * mem::size_of::<InputEvent>();
+                    loop {
+                        let n = unsafe {
+                            libc::read(
+                                fd,
+                                drain_buf.as_mut_ptr() as *mut libc::c_void,
+                                drain_bytes,
+                            )
+                        };
+                        if n <= 0 {
+                            break;
+                        }
+                    }
                     self.devices.push(GrabbedTouchpad {
+                        event_name: name_str.to_string(),
                         phys_fd: fd,
                         uinput_fd,
                         filter: TouchpadFilterState::default(),
@@ -279,12 +307,34 @@ impl TouchpadBlocker {
 
     pub fn unlock(&mut self) {
         self.locked = false;
-        for dev in self.devices.drain(..) {
+        let drained: Vec<GrabbedTouchpad> = self.devices.drain(..).collect();
+        // 1. Destroy virtual uinput touchpads FIRST so udev/libinput removes the clone cleanly
+        for dev in &drained {
+            unsafe {
+                libc::ioctl(dev.uinput_fd, UI_DEV_DESTROY);
+                libc::close(dev.uinput_fd);
+            }
+        }
+        // 2. Release EVIOCGRAB and close physical touchpad fds
+        for dev in &drained {
             unsafe {
                 libc::ioctl(dev.phys_fd, EVIOCGRAB, 0 as libc::c_int);
                 libc::close(dev.phys_fd);
-                libc::ioctl(dev.uinput_fd, UI_DEV_DESTROY);
-                libc::close(dev.uinput_fd);
+            }
+        }
+        if !drained.is_empty() {
+            // 3. Re-announce physical touchpad(s) via sysfs uevent (remove -> add) so
+            //    Wayland/KWin/libinput immediately re-attaches the real physical touchpad
+            //    with fresh MT slot state and OS settings without needing a manual reload!
+            thread::sleep(Duration::from_millis(30));
+            for dev in &drained {
+                let uevent_path = format!("/sys/class/input/{}/uevent", dev.event_name);
+                let _ = std::fs::write(&uevent_path, b"remove\n");
+            }
+            thread::sleep(Duration::from_millis(25));
+            for dev in &drained {
+                let uevent_path = format!("/sys/class/input/{}/uevent", dev.event_name);
+                let _ = std::fs::write(&uevent_path, b"add\n");
             }
         }
     }
@@ -306,20 +356,24 @@ impl TouchpadBlocker {
             };
             if bytes < 0 {
                 let code = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
+                if code == libc::EAGAIN || code == libc::EWOULDBLOCK || code == libc::EINTR {
                     break;
                 }
-                if code == libc::ENODEV {
-                    let dev = self.devices.remove(idx);
-                    unsafe {
-                        libc::close(dev.phys_fd);
-                        libc::ioctl(dev.uinput_fd, UI_DEV_DESTROY);
-                        libc::close(dev.uinput_fd);
-                    }
+                let dev = self.devices.remove(idx);
+                unsafe {
+                    libc::close(dev.phys_fd);
+                    libc::ioctl(dev.uinput_fd, UI_DEV_DESTROY);
+                    libc::close(dev.uinput_fd);
                 }
                 break;
             }
             if bytes == 0 {
+                let dev = self.devices.remove(idx);
+                unsafe {
+                    libc::close(dev.phys_fd);
+                    libc::ioctl(dev.uinput_fd, UI_DEV_DESTROY);
+                    libc::close(dev.uinput_fd);
+                }
                 break;
             }
 
@@ -461,13 +515,21 @@ impl TouchpadBlocker {
     }
 
     fn create_virtual_touchpad(phys_fd: RawFd) -> Result<RawFd, String> {
-        let path = CString::new("/dev/uinput").unwrap();
-        let ufd = unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            )
-        };
+        let mut ufd = -1;
+        for candidate in ["/dev/uinput", "/dev/input/uinput"] {
+            if let Ok(path) = CString::new(candidate) {
+                let fd = unsafe {
+                    libc::open(
+                        path.as_ptr(),
+                        libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                    )
+                };
+                if fd >= 0 {
+                    ufd = fd;
+                    break;
+                }
+            }
+        }
         if ufd < 0 {
             return Err(format!("Unable to open /dev/uinput: {}", io::Error::last_os_error()));
         }
@@ -722,6 +784,23 @@ mod tests {
 
         // Lifting all extra fingers emits clean BTN_TOOL_DOUBLETAP 0 + SYN_REPORT.
         assert!(f.filter_event(&mk(EV_KEY, BTN_TOOL_QUADTAP, 0)).is_empty());
+        assert_eq!(
+            f.filter_event(&mk(EV_SYN, SYN_REPORT, 0)),
+            vec![(EV_KEY, BTN_TOOL_DOUBLETAP, 0), (EV_SYN, SYN_REPORT, 0)]
+        );
+
+        // SYN_DROPPED during heavy 3/4-finger spam clears partial frame & resets extra finger flags
+        assert!(f.filter_event(&mk(EV_KEY, BTN_TOOL_TRIPLETAP, 1)).is_empty());
+        assert!(f.filter_event(&mk(EV_SYN, SYN_DROPPED, 0)).is_empty());
+        assert!(f.filter_event(&mk(EV_SYN, SYN_REPORT, 0)).is_empty());
+
+        // SYN_DROPPED while hw_double is true must also clear hw_double so emitted_double drops cleanly
+        assert!(f.filter_event(&mk(EV_KEY, BTN_TOOL_DOUBLETAP, 1)).is_empty());
+        assert_eq!(
+            f.filter_event(&mk(EV_SYN, SYN_REPORT, 0)),
+            vec![(EV_KEY, BTN_TOOL_DOUBLETAP, 1), (EV_SYN, SYN_REPORT, 0)]
+        );
+        assert!(f.filter_event(&mk(EV_SYN, SYN_DROPPED, 0)).is_empty());
         assert_eq!(
             f.filter_event(&mk(EV_SYN, SYN_REPORT, 0)),
             vec![(EV_KEY, BTN_TOOL_DOUBLETAP, 0), (EV_SYN, SYN_REPORT, 0)]

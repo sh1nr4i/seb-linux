@@ -196,6 +196,15 @@ fn main() {
                     FilterAction::AltTabCancel => {
                         write_json_line(&json!({ "event": "alt_tab_cancel" }));
                     }
+                    FilterAction::NavBack => {
+                        write_json_line(&json!({ "event": "nav_back" }));
+                    }
+                    FilterAction::NavForward => {
+                        write_json_line(&json!({ "event": "nav_forward" }));
+                    }
+                    FilterAction::NavHome => {
+                        write_json_line(&json!({ "event": "nav_home" }));
+                    }
                     _ => {}
                 }
             }

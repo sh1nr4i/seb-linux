@@ -5,9 +5,9 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::mem;
 use std::os::fd::RawFd;
+use std::time::{Duration, Instant};
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
 
 // Linux input event constants (from <linux/input-event-codes.h> & <linux/uinput.h>)
 pub const EV_SYN: u16 = 0x00;
@@ -136,12 +136,16 @@ pub enum FilterAction {
     AltTabStep { backwards: bool },
     AltTabCommit,
     AltTabCancel,
+    NavBack,
+    NavForward,
+    NavHome,
 }
 
 #[derive(Debug, Default)]
 pub struct KeyFilterState {
     pub policy: KeyboardLockPolicy,
     suppressed_keys: HashSet<(RawFd, u16)>,
+    forwarded_keys: HashSet<(RawFd, u16)>,
     held_left_ctrl: HashSet<RawFd>,
     held_right_ctrl: HashSet<RawFd>,
     held_left_alt: HashSet<RawFd>,
@@ -151,11 +155,14 @@ pub struct KeyFilterState {
     held_left_meta: HashSet<RawFd>,
     held_right_meta: HashSet<RawFd>,
     alt_tab_active: bool,
+    alt_tab_repeating: bool,
+    last_alt_tab_step: Option<Instant>,
 }
 
 impl KeyFilterState {
     pub fn reset(&mut self) {
         self.suppressed_keys.clear();
+        self.forwarded_keys.clear();
         self.held_left_ctrl.clear();
         self.held_right_ctrl.clear();
         self.held_left_alt.clear();
@@ -165,6 +172,8 @@ impl KeyFilterState {
         self.held_left_meta.clear();
         self.held_right_meta.clear();
         self.alt_tab_active = false;
+        self.alt_tab_repeating = false;
+        self.last_alt_tab_step = None;
     }
 
     pub fn ctrl_held(&self) -> bool {
@@ -207,9 +216,19 @@ impl KeyFilterState {
         }
     }
 
-    /// Cleanly release modifier tracking if a grabbed keyboard is hot-unplugged (`ENODEV`).
-    pub fn clear_device(&mut self, device_id: RawFd) -> Option<FilterAction> {
+    /// Cleanly release modifier tracking if a grabbed keyboard is hot-unplugged (`ENODEV` / EOF).
+    /// Returns `(released_keycodes_for_uinput, optional_alt_tab_commit)`.
+    pub fn clear_device(&mut self, device_id: RawFd) -> (Vec<u16>, Option<FilterAction>) {
         self.suppressed_keys.retain(|&(d, _)| d != device_id);
+        let mut dev_keys: Vec<u16> = self
+            .forwarded_keys
+            .iter()
+            .filter(|&&(d, _)| d == device_id)
+            .map(|&(_, c)| c)
+            .collect();
+        self.forwarded_keys.retain(|&(d, _)| d != device_id);
+        // Only emit release on /dev/uinput for keys not still held on another keyboard
+        dev_keys.retain(|&c| !self.forwarded_keys.iter().any(|&(_, other)| other == c));
         self.held_left_ctrl.remove(&device_id);
         self.held_right_ctrl.remove(&device_id);
         self.held_left_alt.remove(&device_id);
@@ -218,11 +237,15 @@ impl KeyFilterState {
         self.held_right_shift.remove(&device_id);
         self.held_left_meta.remove(&device_id);
         self.held_right_meta.remove(&device_id);
-        if self.alt_tab_active && !self.alt_held() {
+        let commit = if self.alt_tab_active && !self.alt_held() {
             self.alt_tab_active = false;
-            return Some(FilterAction::AltTabCommit);
-        }
-        None
+            self.alt_tab_repeating = false;
+            self.last_alt_tab_step = None;
+            Some(FilterAction::AltTabCommit)
+        } else {
+            None
+        };
+        (dev_keys, commit)
     }
 
     #[cfg(test)]
@@ -263,7 +286,17 @@ impl KeyFilterState {
             && !self.alt_held()
         {
             self.alt_tab_active = false;
+        self.alt_tab_repeating = false;
+        self.last_alt_tab_step = None;
             side_event = Some(FilterAction::AltTabCommit);
+        }
+
+        // CRITICAL INVARIANT: Any key previously forwarded as pressed to /dev/uinput MUST
+        // always have its release forwarded, even if Alt/Ctrl/Meta was pressed in between
+        // (e.g. hold TAB -> press ALT -> release TAB), otherwise the key stays stuck repeating!
+        if value == 0 && self.forwarded_keys.remove(&(device_id, code)) {
+            self.suppressed_keys.remove(&(device_id, code));
+            return (side_event, FilterAction::Forward);
         }
 
         let ctrl = self.ctrl_held();
@@ -276,6 +309,18 @@ impl KeyFilterState {
             return (side_event, FilterAction::Drop);
         }
 
+        // CRITICAL: Never forward LeftAlt to /dev/uinput when OS Alt shortcuts are blocked.
+        // Keeping LeftAlt completely invisible to the OS compositor eliminates both:
+        // 1) OS Alt+Tab race conditions during rapid Alt+Tab spamming, and
+        // 2) KWin/GNOME Alt+Touchpad (drag/click/scroll) window-escape shortcuts.
+        // SEB internal Alt+Tab and Alt+Left/Right/Home continue working via IPC.
+        let suppress_left_alt = !self.policy.allow_alt_tab
+            && !self.policy.allow_alt_f4
+            && !self.policy.allow_alt_esc;
+        if suppress_left_alt && code == KEY_LEFTALT {
+            return (side_event, FilterAction::Drop);
+        }
+
         if value == 0 && self.suppressed_keys.remove(&(device_id, code)) {
             return (side_event, FilterAction::Drop);
         }
@@ -284,6 +329,8 @@ impl KeyFilterState {
             if value == 1 {
                 self.suppressed_keys.insert((device_id, code));
                 self.alt_tab_active = false;
+        self.alt_tab_repeating = false;
+        self.last_alt_tab_step = None;
                 return (side_event, FilterAction::AltTabCancel);
             }
             return (side_event, FilterAction::Drop);
@@ -293,12 +340,47 @@ impl KeyFilterState {
             if value == 1 || value == 2 {
                 self.suppressed_keys.insert((device_id, code));
                 self.alt_tab_active = true;
+                let now = Instant::now();
+                let min_gap = if value == 2 {
+                    // Require a deliberate 550ms initial hold before auto-repeat begins,
+                    // then step every 250ms while held.
+                    if self.alt_tab_repeating {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_millis(550)
+                    }
+                } else {
+                    // Short 45ms anti-bounce on fresh press
+                    Duration::from_millis(45)
+                };
+                if let Some(prev) = self.last_alt_tab_step {
+                    if now.duration_since(prev) < min_gap {
+                        return (side_event, FilterAction::Drop);
+                    }
+                }
+                self.alt_tab_repeating = value == 2;
+                self.last_alt_tab_step = Some(now);
                 return (
                     side_event,
                     FilterAction::AltTabStep {
                         backwards: self.shift_held(),
                     },
                 );
+            }
+            return (side_event, FilterAction::Drop);
+        }
+
+        // Translate Alt+Left / Alt+Right / Alt+Home via IPC so browser navigation still works
+        // without ever emitting KEY_LEFTALT to the OS compositor.
+        if alt && !ctrl && !meta && matches!(code, KEY_LEFT | KEY_RIGHT | KEY_HOME) {
+            if value == 1 {
+                self.suppressed_keys.insert((device_id, code));
+                let nav = match code {
+                    KEY_LEFT => FilterAction::NavBack,
+                    KEY_RIGHT => FilterAction::NavForward,
+                    _ => FilterAction::NavHome,
+                };
+                return (side_event, nav);
             }
             return (side_event, FilterAction::Drop);
         }
@@ -383,6 +465,11 @@ impl KeyFilterState {
             return (side_event, FilterAction::Drop);
         }
 
+        if value != 0 {
+            self.forwarded_keys.insert((device_id, code));
+        } else {
+            self.forwarded_keys.remove(&(device_id, code));
+        }
         (side_event, FilterAction::Forward)
     }
 }
@@ -434,6 +521,7 @@ pub struct KeyboardBlocker {
     uinput_fd: RawFd,
     device_fds: Vec<RawFd>,
     locked: bool,
+    right_alt_forwarded: bool,
     filter: KeyFilterState,
 }
 
@@ -443,6 +531,7 @@ impl KeyboardBlocker {
             uinput_fd: -1,
             device_fds: Vec::new(),
             locked: false,
+            right_alt_forwarded: false,
             filter: KeyFilterState::default(),
         }
     }
@@ -470,6 +559,7 @@ impl KeyboardBlocker {
         }
 
         self.filter.reset();
+        self.right_alt_forwarded = false;
         self.create_virtual_keyboard()?;
         thread::sleep(Duration::from_millis(80));
 
@@ -517,6 +607,21 @@ impl KeyboardBlocker {
                 unsafe { libc::close(fd) };
                 continue;
             }
+            // Drain any stale pre-grab events buffered during wait_keys_released before reading EVIOCGKEY
+            let mut drain_buf = [InputEvent::default(); 64];
+            let drain_bytes = drain_buf.len() * mem::size_of::<InputEvent>();
+            loop {
+                let n = unsafe {
+                    libc::read(
+                        fd,
+                        drain_buf.as_mut_ptr() as *mut libc::c_void,
+                        drain_bytes,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+            }
             let mut key_state = [0u8; (KEY_MAX / 8) + 1];
             if unsafe {
                 libc::ioctl(
@@ -552,6 +657,7 @@ impl KeyboardBlocker {
             }
         }
         self.destroy_virtual_keyboard();
+        self.right_alt_forwarded = false;
         self.filter.reset();
     }
 
@@ -571,19 +677,14 @@ impl KeyboardBlocker {
             if bytes < 0 {
                 let err = io::Error::last_os_error();
                 let code = err.raw_os_error().unwrap_or(0);
-                if code == libc::EAGAIN || code == libc::EWOULDBLOCK {
+                if code == libc::EAGAIN || code == libc::EWOULDBLOCK || code == libc::EINTR {
                     break;
                 }
-                if code == libc::ENODEV {
-                    self.device_fds.retain(|&f| f != fd);
-                    if let Some(act) = self.filter.clear_device(fd) {
-                        emitted_ipc.push(act);
-                    }
-                    unsafe { libc::close(fd) };
-                }
+                self.detach_dead_fd(fd, &mut emitted_ipc);
                 break;
             }
             if bytes == 0 {
+                self.detach_dead_fd(fd, &mut emitted_ipc);
                 break;
             }
 
@@ -594,6 +695,24 @@ impl KeyboardBlocker {
         }
 
         emitted_ipc
+    }
+
+    fn detach_dead_fd(&mut self, fd: RawFd, emitted_ipc: &mut Vec<FilterAction>) {
+        self.device_fds.retain(|&f| f != fd);
+        let (released_keys, commit) = self.filter.clear_device(fd);
+        if !released_keys.is_empty() && self.uinput_fd >= 0 {
+            for code in released_keys {
+                if code == KEY_RIGHTALT {
+                    self.right_alt_forwarded = false;
+                }
+                self.emit_key(code, 0);
+            }
+            self.emit_syn();
+        }
+        if let Some(act) = commit {
+            emitted_ipc.push(act);
+        }
+        unsafe { libc::close(fd) };
     }
 
     fn process_input_event(
@@ -612,6 +731,9 @@ impl KeyboardBlocker {
             }
             match action {
                 FilterAction::Forward => {
+                    if ev.code == KEY_RIGHTALT {
+                        self.right_alt_forwarded = ev.value != 0;
+                    }
                     self.emit_key(ev.code, ev.value);
                     self.emit_syn();
                 }
@@ -620,6 +742,12 @@ impl KeyboardBlocker {
                     self.emit_action_center_combo();
                 }
                 FilterAction::AltTabStep { backwards } => {
+                    // Ensure RightAlt (AltGr) is released on uinput if Alt+Tab was triggered with it
+                    if self.right_alt_forwarded {
+                        self.right_alt_forwarded = false;
+                        self.emit_key(KEY_RIGHTALT, 0);
+                        self.emit_syn();
+                    }
                     ipc_out.push(FilterAction::AltTabStep { backwards });
                 }
                 FilterAction::AltTabCancel => {
@@ -627,6 +755,9 @@ impl KeyboardBlocker {
                 }
                 FilterAction::AltTabCommit => {
                     ipc_out.push(FilterAction::AltTabCommit);
+                }
+                FilterAction::NavBack | FilterAction::NavForward | FilterAction::NavHome => {
+                    ipc_out.push(action);
                 }
             }
         } else if ev.type_ == EV_SYN && ev.code == SYN_REPORT {
@@ -924,7 +1055,8 @@ mod tests {
         let mut f = KeyFilterState::default();
         f.policy.allow_action_center_combo = true;
 
-        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Forward));
+        // LeftAlt is NEVER emitted to uinput when OS Alt shortcuts are locked
+        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Drop));
         assert_eq!(
             f.process_key(KEY_TAB, 1),
             (None, FilterAction::AltTabStep { backwards: false })
@@ -932,8 +1064,18 @@ mod tests {
         assert_eq!(f.process_key(KEY_TAB, 0), (None, FilterAction::Drop));
         assert_eq!(
             f.process_key(KEY_LEFTALT, 0),
-            (Some(FilterAction::AltTabCommit), FilterAction::Forward)
+            (Some(FilterAction::AltTabCommit), FilterAction::Drop)
         );
+
+        // Alt+Left / Alt+Right / Alt+Home translate to IPC nav actions without leaking LeftAlt
+        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Drop));
+        assert_eq!(f.process_key(KEY_LEFT, 1), (None, FilterAction::NavBack));
+        assert_eq!(f.process_key(KEY_LEFT, 0), (None, FilterAction::Drop));
+        assert_eq!(f.process_key(KEY_RIGHT, 1), (None, FilterAction::NavForward));
+        assert_eq!(f.process_key(KEY_RIGHT, 0), (None, FilterAction::Drop));
+        assert_eq!(f.process_key(KEY_HOME, 1), (None, FilterAction::NavHome));
+        assert_eq!(f.process_key(KEY_HOME, 0), (None, FilterAction::Drop));
+        assert_eq!(f.process_key(KEY_LEFTALT, 0), (None, FilterAction::Drop));
     }
 
     #[test]
@@ -957,17 +1099,17 @@ mod tests {
         assert_eq!(f.process_key(KEY_A, 0), (None, FilterAction::Forward));
 
         // Alt+F3 (KEY_F1 + 2 = 61)
-        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Forward));
+        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Drop));
         assert_eq!(f.process_key(KEY_F1 + 2, 1), (None, FilterAction::Drop));
         assert_eq!(f.process_key(KEY_F1 + 2, 0), (None, FilterAction::Drop));
-        assert_eq!(f.process_key(KEY_LEFTALT, 0), (None, FilterAction::Forward));
+        assert_eq!(f.process_key(KEY_LEFTALT, 0), (None, FilterAction::Drop));
 
         // Ctrl+Alt+F3
         assert_eq!(
             f.process_key(KEY_LEFTCTRL, 1),
             (None, FilterAction::Forward)
         );
-        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Forward));
+        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Drop));
         assert_eq!(f.process_key(KEY_F1 + 2, 1), (None, FilterAction::Drop));
 
         // Standalone F13..F24 system/launch keys
@@ -983,18 +1125,18 @@ mod tests {
         // Device 10 holds LeftAlt; spurious release on device 11 must NOT clear device 10's Alt
         assert_eq!(
             f.process_key_for_device(10, KEY_LEFTALT, 1),
-            (None, FilterAction::Forward)
+            (None, FilterAction::Drop)
         );
         assert_eq!(
             f.process_key_for_device(11, KEY_LEFTALT, 0),
-            (None, FilterAction::Forward)
+            (None, FilterAction::Drop)
         );
         assert_eq!(
             f.process_key_for_device(10, KEY_TAB, 1),
             (None, FilterAction::AltTabStep { backwards: false })
         );
         // Unplugging device 10 cleanly commits the active Alt+Tab session
-        assert_eq!(f.clear_device(10), Some(FilterAction::AltTabCommit));
+        assert_eq!(f.clear_device(10).1, Some(FilterAction::AltTabCommit));
 
         // Pre-grab held Alt synced via EVIOCGKEY must catch Tab and drop orphan Alt release
         let mut f2 = KeyFilterState::default();
@@ -1010,5 +1152,51 @@ mod tests {
             f2.process_key_for_device(20, KEY_LEFTALT, 0),
             (Some(FilterAction::AltTabCommit), FilterAction::Drop)
         );
+    }
+
+    #[test]
+    fn hold_tab_then_press_alt_then_release_tab_never_sticks_tab() {
+        let mut f = KeyFilterState::default();
+
+        // 1. Hold TAB (forwarded to uinput)
+        assert_eq!(f.process_key(KEY_TAB, 1), (None, FilterAction::Forward));
+        // 2. Press LeftAlt while TAB is still held (LeftAlt dropped)
+        assert_eq!(f.process_key(KEY_LEFTALT, 1), (None, FilterAction::Drop));
+        // 3. Hardware TAB repeat while Alt is held
+        assert_eq!(
+            f.process_key(KEY_TAB, 2),
+            (None, FilterAction::AltTabStep { backwards: false })
+        );
+        // 4. Release TAB while Alt is still held -> MUST forward KEY_TAB 0 so TAB stops repeating!
+        assert_eq!(f.process_key(KEY_TAB, 0), (None, FilterAction::Forward));
+        // 5. Release Alt -> commits switcher cleanly
+        assert_eq!(
+            f.process_key(KEY_LEFTALT, 0),
+            (Some(FilterAction::AltTabCommit), FilterAction::Drop)
+        );
+    }
+
+    #[test]
+    fn clear_device_returns_released_forwarded_keys_excluding_other_devices() {
+        let mut f = KeyFilterState::default();
+        assert_eq!(
+            f.process_key_for_device(10, KEY_A, 1),
+            (None, FilterAction::Forward)
+        );
+        assert_eq!(
+            f.process_key_for_device(10, KEY_LEFTCTRL, 1),
+            (None, FilterAction::Forward)
+        );
+        // Device 11 also holds KEY_LEFTCTRL
+        assert_eq!(
+            f.process_key_for_device(11, KEY_LEFTCTRL, 1),
+            (None, FilterAction::Forward)
+        );
+
+        // Unplugging device 10 should release KEY_A, but NOT KEY_LEFTCTRL (still held on device 11)
+        let (released, commit) = f.clear_device(10);
+        assert_eq!(commit, None);
+        assert!(released.contains(&KEY_A));
+        assert!(!released.contains(&KEY_LEFTCTRL));
     }
 }

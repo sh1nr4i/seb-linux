@@ -256,22 +256,56 @@ pub fn detect_prohibited_processes(blacklist: &[String]) -> Vec<String> {
             .map(|s| s.trim().to_lowercase())
             .unwrap_or_default();
 
+        let is_wrapper = exe_name.is_empty()
+            || matches!(
+                exe_name.as_str(),
+                "sh" | "bash"
+                    | "dash"
+                    | "zsh"
+                    | "fish"
+                    | "env"
+                    | "python"
+                    | "python3"
+                    | "node"
+                    | "electron"
+                    | "java"
+                    | "wine"
+                    | "wine64"
+                    | "flatpak"
+                    | "snap"
+            );
         let cmdline_hit = fs::read(format!("/proc/{pid}/cmdline"))
             .ok()
             .and_then(|bytes| {
-                bytes
+                let mut args = bytes
                     .split(|&b| b == 0)
                     .filter(|s| !s.is_empty())
-                    .take(4)
-                    .filter_map(|s| std::str::from_utf8(s).ok())
-                    .filter(|arg| !arg.starts_with('-'))
-                    .filter_map(|arg| {
-                        Path::new(arg.trim())
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.to_lowercase())
-                    })
-                    .find(|n| prohibited.contains(n))
+                    .filter_map(|s| std::str::from_utf8(s).ok());
+                let arg0 = args.next();
+                if let Some(a0) = arg0 {
+                    if let Some(b0) = Path::new(a0.trim())
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.to_lowercase())
+                    {
+                        if prohibited.contains(&b0) {
+                            return Some(b0);
+                        }
+                    }
+                }
+                if is_wrapper {
+                    return args
+                        .filter(|arg| !arg.starts_with('-'))
+                        .take(4)
+                        .filter_map(|arg| {
+                            Path::new(arg.trim())
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|n| n.to_lowercase())
+                        })
+                        .find(|n| prohibited.contains(n));
+                }
+                None
             });
 
         let matched = if !exe_name.is_empty() && prohibited.contains(&exe_name) {
@@ -355,11 +389,25 @@ impl SessionIntegrityStore {
 
         if verify && has_quit_password {
             if !is_valid_key(configuration_key) {
+                if self.active_key.is_empty() {
+                    self.release();
+                }
                 return Err("Session verification requires a valid configuration key.".to_string());
             }
-            let records = self.read_records()?;
+            let records = match self.read_records() {
+                Ok(r) => r,
+                Err(e) => {
+                    if self.active_key.is_empty() {
+                        self.release();
+                    }
+                    return Err(e);
+                }
+            };
             if records.iter().any(|k| k == configuration_key) && configuration_key != self.active_key
             {
+                if self.active_key.is_empty() {
+                    self.release();
+                }
                 return Err(
                     "This configuration was found in unfinished session history. The previous exam session did not shut down cleanly."
                         .to_string(),
@@ -520,7 +568,13 @@ impl SessionIntegrityStore {
             bytes[FILE_MAGIC.len() + 4],
             bytes[FILE_MAGIC.len() + 5],
         ]) as usize;
-        if bytes.len() != header_len + payload_len + 32 {
+        let Some(expected_total) = header_len
+            .checked_add(payload_len)
+            .and_then(|n| n.checked_add(32))
+        else {
+            return Err("Protected session history is corrupted or unsupported.".to_string());
+        };
+        if bytes.len() != expected_total {
             return Err("Protected session history is corrupted or unsupported.".to_string());
         }
         let payload = &bytes[header_len..header_len + payload_len];

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${SEB_VERSION:-0.6.1}"
+VERSION="${SEB_VERSION:-0.6.2}"
 DIST_DIR="${ROOT_DIR}/dist"
 BUILD_ALL=1
 BUILD_DEB=0
@@ -151,7 +151,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: SEB Linux Contributors <noreply@example.org>
 Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, shared-mime-info, desktop-file-utils
-Description: Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK)
+Description: Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
  Opens .seb exam configuration files, handles seb:// and sebs:// links,
  and enforces kernel-level anti-cheat lockdown.
 EOF
@@ -195,7 +195,7 @@ if [[ "${BUILD_RPM}" -eq 1 ]]; then
 Name:           safe-exam-browser
 Version:        ${SEB_VERSION}
 Release:        1%{?dist}
-Summary:        Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK)
+Summary:        Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
 License:        MPL-2.0
 Requires:       webkit2gtk4.1, gtk3, polkit, desktop-file-utils, shared-mime-info
 

@@ -1,7 +1,7 @@
 pkgname=safe-exam-browser
-pkgver=0.6.1
+pkgver=0.6.2
 pkgrel=1
-pkgdesc="Safe Exam Browser for Linux (Pure Rust GTK3 + WebKitGTK edition)"
+pkgdesc="Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)"
 arch=('x86_64')
 url="https://github.com/sh1nr4i/seb-linux-rust"
 license=('MPL-2.0')

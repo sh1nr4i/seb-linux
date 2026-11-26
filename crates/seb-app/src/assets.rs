@@ -1,5 +1,6 @@
 use gdk_pixbuf::prelude::PixbufLoaderExt;
 use gdk_pixbuf::{Pixbuf, PixbufLoader};
+use gtk::prelude::WidgetExt;
 
 pub const ICON_SEB_PNG: &[u8] = include_bytes!("../../../assets/icons/safe-exam-browser-64.png");
 pub const ICON_ABOUT_SVG: &[u8] = include_bytes!("../../../assets/taskbar/about.svg");
@@ -282,10 +283,12 @@ pub fn pixbuf_from_bytes(bytes: &[u8], width: i32, height: i32) -> Option<Pixbuf
 }
 
 pub fn image_from_bytes(bytes: &[u8], width: i32, height: i32) -> gtk::Image {
-    match pixbuf_from_bytes(bytes, width, height) {
+    let img = match pixbuf_from_bytes(bytes, width, height) {
         Some(pb) => gtk::Image::from_pixbuf(Some(&pb)),
         None => gtk::Image::new(),
-    }
+    };
+    img.show();
+    img
 }
 
 /// Dynamic battery icon matching C++ `battery_control.cpp`:
