@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "seb-app"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "base64",
  "cairo-rs",
@@ -2394,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "seb-config"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "seb-filter"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "regex",
  "serde",
@@ -2432,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "seb-lockdown-helper"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "libc",
  "serde",
@@ -2441,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "seb-platform"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "pulseaudio",
  "regex",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "seb-proctoring"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "seb-security"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "hex",
  "libc",
@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "seb-server"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "base64",
  "serde",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "seb-web-extension"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "glib",
  "libc",

@@ -4,7 +4,7 @@ use seb_security::VersionRestriction;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const SEB_APPLICATION_VERSION: &str = "0.6.2";
+pub const SEB_APPLICATION_VERSION: &str = "0.6.3";
 pub const SEB_COMPATIBILITY_VERSION: &str = "3.10.2";
 pub const SEB_COMPATIBILITY_BUILD_VERSION: &str = "3.10.2.0";
 

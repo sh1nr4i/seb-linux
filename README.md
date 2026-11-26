@@ -5,7 +5,7 @@
 </div>
 
 > [!NOTE]
-> **Beta Release (`v0.6.2-beta`)**: Core exam flows, Moodle `.seb` reconfiguration, SEB Server, Screen Proctoring, and kernel-level anti-cheat lockdown are implemented and tested, while broader real-world exam scenarios across Linux distributions are still being validated. Please report any issues you encounter.
+> **Beta Release (`v0.6.3-beta`)**: Core exam flows, Moodle `.seb` reconfiguration, SEB Server, Screen Proctoring, and kernel-level anti-cheat lockdown are implemented and tested, while broader real-world exam scenarios across Linux distributions are still being validated. Please report any issues you encounter.
 
 ## Overview
 
@@ -36,11 +36,11 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
 
 - **Debian / Ubuntu (`.deb`)**:
   ```bash
-  sudo apt install ./safe-exam-browser_0.6.2_amd64.deb
+  sudo apt install ./safe-exam-browser_0.6.3_amd64.deb
   ```
 - **Fedora / RHEL (`.rpm`)**:
   ```bash
-  sudo dnf install ./safe-exam-browser-0.6.2-1.*.x86_64.rpm
+  sudo dnf install ./safe-exam-browser-0.6.3-1.*.x86_64.rpm
   ```
 - **Arch Linux (`PKGBUILD`)**:
   ```bash
@@ -48,8 +48,8 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
   ```
 - **Universal Linux Tarball (`.tar.gz`)**:
   ```bash
-  tar -xzf safe-exam-browser-0.6.2-linux-x86_64.tar.gz
-  cd safe-exam-browser-0.6.2-linux-x86_64
+  tar -xzf safe-exam-browser-0.6.3-linux-x86_64.tar.gz
+  cd safe-exam-browser-0.6.3-linux-x86_64
   sudo ./install.sh
   ```
 
