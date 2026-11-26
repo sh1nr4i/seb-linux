@@ -16,6 +16,34 @@ permissions:
 
 jobs:
   build-linux-packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build multi-distro release packages (.deb, .rpm, .tar.gz) for ${{ matrix.arch }}
+        run: |
+          chmod +x scripts/build-release.sh
+          ./scripts/build-release.sh --all
+
+      - name: Upload ${{ matrix.arch }} release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: safe-exam-browser-linux-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+
+  publish-release:
+    needs: build-linux-packages
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -37,21 +65,17 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build multi-distro release packages (.deb, .rpm, .tar.gz)
-        run: |
-          chmod +x scripts/build-release.sh
-          ./scripts/build-release.sh --all
-          (cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS.txt)
-
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+      - name: Download all architecture artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: safe-exam-browser-linux-dist
-          path: |
-            dist/*.deb
-            dist/*.rpm
-            dist/*.tar.gz
-            dist/SHA256SUMS.txt
+          path: dist
+          pattern: safe-exam-browser-linux-*
+          merge-multiple: true
+
+      - name: Generate combined SHA256SUMS.txt
+        run: |
+          (cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS.txt)
+          ls -lh dist
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

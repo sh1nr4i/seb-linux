@@ -77,10 +77,11 @@ stage_bundle_tree() {
 
 if [[ "${BUILD_LOCAL}" -eq 1 ]]; then
   "${ROOT_DIR}/scripts/build.sh" --user
-  stage_dir="${ROOT_DIR}/build/stage-local/safe-exam-browser-${VERSION}-linux-x86_64"
+  local_arch="$(uname -m)"
+  stage_dir="${ROOT_DIR}/build/stage-local/safe-exam-browser-${VERSION}-linux-${local_arch}"
   stage_bundle_tree "${ROOT_DIR}/build/bin" "${stage_dir}"
-  tar -C "$(dirname "${stage_dir}")" -czf "${DIST_DIR}/safe-exam-browser-${VERSION}-local-x86_64.tar.gz" "$(basename "${stage_dir}")"
-  echo "Created local tarball: ${DIST_DIR}/safe-exam-browser-${VERSION}-local-x86_64.tar.gz"
+  tar -C "$(dirname "${stage_dir}")" -czf "${DIST_DIR}/safe-exam-browser-${VERSION}-local-${local_arch}.tar.gz" "$(basename "${stage_dir}")"
+  echo "Created local tarball: ${DIST_DIR}/safe-exam-browser-${VERSION}-local-${local_arch}.tar.gz"
 fi
 
 if [[ "${BUILD_DEB}" -eq 1 || "${BUILD_TARBALL}" -eq 1 ]]; then
@@ -101,11 +102,13 @@ if [[ "${BUILD_DEB}" -eq 1 || "${BUILD_TARBALL}" -eq 1 ]]; then
     seb-rust-ubuntu22 \
     bash -ceu '
       cd /src
+      ARCH_UNAME="$(uname -m)"
+      DEB_ARCH="$(dpkg --print-architecture)"
       cargo build --release --target-dir /target-ubuntu22 -p seb-app -p seb-lockdown-helper -p seb-web-extension
       OUT=/target-ubuntu22/release
 
       if [ "${BUILD_TARBALL}" = "1" ]; then
-        STAGE="/tmp/seb-stage/safe-exam-browser-${SEB_VERSION}-linux-x86_64"
+        STAGE="/tmp/seb-stage/safe-exam-browser-${SEB_VERSION}-linux-${ARCH_UNAME}"
         rm -rf /tmp/seb-stage
         mkdir -p "${STAGE}/bin" "${STAGE}/share/polkit-1/actions" "${STAGE}/share/applications" \
           "${STAGE}/share/mime/packages" "${STAGE}/share/metainfo" \
@@ -120,7 +123,7 @@ if [[ "${BUILD_DEB}" -eq 1 || "${BUILD_TARBALL}" -eq 1 ]]; then
         cp -f assets/icons/safe-exam-browser.png "${STAGE}/share/icons/hicolor/256x256/apps/safe-exam-browser.png"
         cp -f packaging/linux/install.sh packaging/linux/uninstall.sh "${STAGE}/"
         chmod 0755 "${STAGE}/install.sh" "${STAGE}/uninstall.sh"
-        tar -C /tmp/seb-stage -czf "/src/dist/safe-exam-browser-${SEB_VERSION}-linux-x86_64.tar.gz" "safe-exam-browser-${SEB_VERSION}-linux-x86_64"
+        tar -C /tmp/seb-stage -czf "/src/dist/safe-exam-browser-${SEB_VERSION}-linux-${ARCH_UNAME}.tar.gz" "safe-exam-browser-${SEB_VERSION}-linux-${ARCH_UNAME}"
       fi
 
       if [ "${BUILD_DEB}" = "1" ]; then
@@ -148,9 +151,9 @@ Package: safe-exam-browser
 Version: ${SEB_VERSION}
 Section: education
 Priority: optional
-Architecture: amd64
+Architecture: ${DEB_ARCH}
 Maintainer: SEB Linux Contributors <noreply@example.org>
-Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, shared-mime-info, desktop-file-utils
+Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, poppler-utils, shared-mime-info, desktop-file-utils
 Description: Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
  Opens .seb exam configuration files, handles seb:// and sebs:// links,
  and enforces kernel-level anti-cheat lockdown.
@@ -163,7 +166,7 @@ update-mime-database /usr/share/mime >/dev/null 2>&1 || true
 gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 EOF
         chmod 0755 "${DEB_ROOT}/DEBIAN/postinst"
-        dpkg-deb --build --root-owner-group "${DEB_ROOT}" "/src/dist/safe-exam-browser_${SEB_VERSION}_amd64.deb"
+        dpkg-deb --build --root-owner-group "${DEB_ROOT}" "/src/dist/safe-exam-browser_${SEB_VERSION}_${DEB_ARCH}.deb"
       fi
       chown -R "${HOST_UID}:${HOST_GID}" /src/dist
     '
@@ -197,7 +200,7 @@ Version:        ${SEB_VERSION}
 Release:        1%{?dist}
 Summary:        Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
 License:        MPL-2.0
-Requires:       webkit2gtk4.1, gtk3, polkit, gstreamer1-plugins-base, gstreamer1-plugins-good, desktop-file-utils, shared-mime-info
+Requires:       webkit2gtk4.1, gtk3, polkit, gstreamer1-plugins-base, gstreamer1-plugins-good, poppler-utils, desktop-file-utils, shared-mime-info
 
 %description
 Opens .seb exam configuration files, handles seb:// and sebs:// links,
