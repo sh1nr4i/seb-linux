@@ -32,7 +32,7 @@
 
 ## Installation
 
-Pre-built packages are published on the [GitHub Releases](https://github.com/sh1nr4i/seb-linux-rust/releases) page:
+Pre-built packages for **`x86_64` (amd64)** and **`ARM64` (aarch64)** are published on the [GitHub Releases](https://github.com/sh1nr4i/seb-linux-rust/releases) page:
 
 - **Debian / Ubuntu (`.deb`)**:
   ```bash
@@ -61,7 +61,7 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
 ./scripts/dependencies.sh
 ```
 
-Required libraries: Rust/Cargo toolchain, `gtk3`, `webkit2gtk-4.1`, `gst-plugins-base`, `gst-plugins-good` (for camera/microphone/audio in WebKitGTK), `polkit`, `pkg-config`, and standard desktop MIME/icon utilities.
+Required libraries: Rust/Cargo toolchain, `gtk3`, `webkit2gtk-4.1`, `gst-plugins-base`, `gst-plugins-good` (camera/mic/audio), `poppler-utils`/`poppler` (inline PDF viewer), `polkit`, `pkg-config`, and standard desktop MIME/icon utilities.
 
 ### 2. Build
 
