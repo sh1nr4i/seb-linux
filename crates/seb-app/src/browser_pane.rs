@@ -524,6 +524,7 @@ impl BrowserPane {
                 || settings.browser.media_capture_microphone;
             wk_settings.set_enable_media_stream(allow_any_media);
             wk_settings.set_enable_webrtc(allow_any_media);
+            wk_settings.set_media_playback_requires_user_gesture(false);
             wk_settings.set_enable_html5_database(true);
             wk_settings.set_enable_html5_local_storage(true);
         }
@@ -2193,16 +2194,43 @@ impl BrowserPane {
     }
 
     pub fn print_page(&self) {
-        if self.allow_print {
-            let parent = self
-                .root
-                .toplevel()
-                .and_then(|w| w.downcast::<gtk::Window>().ok());
-            let op = PrintOperation::new(&self.web_view);
-            dialogs::with_external_modal(|| {
-                op.run_dialog(parent.as_ref());
-            });
+        if !self.allow_print {
+            return;
         }
+        let parent = self
+            .root
+            .toplevel()
+            .and_then(|w| w.downcast::<gtk::Window>().ok());
+        let default_dir = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Documents"))
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let Some(job) = dialogs::show_print_dialog(parent.as_ref(), &default_dir) else {
+            return;
+        };
+
+        let op = PrintOperation::new(&self.web_view);
+        let ps = gtk::PrintSettings::new();
+        ps.set_n_copies(job.copies.clamp(1, 99));
+        let page_setup = gtk::PageSetup::new();
+        page_setup.set_orientation(if job.landscape {
+            gtk::PageOrientation::Landscape
+        } else {
+            gtk::PageOrientation::Portrait
+        });
+        if let Some(pdf_path) = job.output_pdf_path {
+            ps.set_printer("Print to File");
+            ps.set("output-file-format", Some("pdf"));
+            ps.set(
+                "output-uri",
+                Some(&format!("file://{}", pdf_path.to_string_lossy())),
+            );
+        } else {
+            ps.set_printer(&job.printer_name);
+        }
+        op.set_print_settings(&ps);
+        op.set_page_setup(&page_setup);
+        op.print();
     }
 
     /// Converts this pane into a borderless, always-on-top floating proctoring window:

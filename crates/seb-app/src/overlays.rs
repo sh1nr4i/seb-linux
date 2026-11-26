@@ -40,6 +40,9 @@ pub struct ActionCenterOverlay {
     pub root: gtk::Box,
     revealer: gtk::Revealer,
     windows_box: gtk::Box,
+    tiles_grid: gtk::Grid,
+    tile_buttons: Vec<gtk::Button>,
+    proctoring_visible: Cell<bool>,
     clock_label: Option<gtk::Label>,
     audio_tile: Option<(gtk::Image, gtk::Label)>,
     inline_audio: Option<(gtk::Button, gtk::Scale, gtk::Label, Rc<Cell<bool>>)>,
@@ -115,7 +118,7 @@ impl ActionCenterOverlay {
         inner.pack_start(&grid, false, false, 4);
 
         let ac = &settings.user_interface.action_center;
-        let mut idx = 0i32;
+        let mut tile_buttons: Vec<gtk::Button> = Vec::new();
 
         let mk_tile = |svg: &[u8], text: &str| -> (gtk::Button, gtk::Image, gtk::Label) {
             let btn = gtk::Button::new();
@@ -134,8 +137,7 @@ impl ActionCenterOverlay {
         };
 
         let mut add_tile = |btn: &gtk::Button| {
-            grid.attach(btn, idx % MAX_COLUMNS, idx / MAX_COLUMNS, 1, 1);
-            idx += 1;
+            tile_buttons.push(btn.clone());
         };
 
         if ac.show_application_info {
@@ -341,10 +343,13 @@ impl ActionCenterOverlay {
             None
         };
 
-        Rc::new(Self {
+        let overlay = Rc::new(Self {
             root,
             revealer,
             windows_box,
+            tiles_grid: grid,
+            tile_buttons,
+            proctoring_visible: Cell::new(false),
             clock_label,
             audio_tile,
             inline_audio,
@@ -355,7 +360,28 @@ impl ActionCenterOverlay {
             proctoring_tile,
             crit_thresh: settings.power_supply.charge_threshold_critical,
             low_thresh: settings.power_supply.charge_threshold_low,
-        })
+        });
+        overlay.relayout_tiles();
+        overlay
+    }
+
+    fn relayout_tiles(&self) {
+        for child in self.tiles_grid.children() {
+            self.tiles_grid.remove(&child);
+        }
+        let proc_btn_opt = self.proctoring_tile.as_ref().map(|(b, _, _)| b);
+        let proc_vis = self.proctoring_visible.get();
+        let mut idx = 0i32;
+        for btn in &self.tile_buttons {
+            if let Some(pb) = proc_btn_opt {
+                if btn == pb && !proc_vis {
+                    continue;
+                }
+            }
+            self.tiles_grid
+                .attach(btn, idx % MAX_COLUMNS, idx / MAX_COLUMNS, 1, 1);
+            idx += 1;
+        }
     }
 
     pub fn toggle(
@@ -400,9 +426,13 @@ impl ActionCenterOverlay {
 
     pub fn update_proctoring_status(&self, state: ProctoringState, text: &str, show_tile: bool) {
         if let Some((ref btn, ref img, ref lbl)) = self.proctoring_tile {
+            let changed = self.proctoring_visible.replace(show_tile) != show_tile;
             if !show_tile {
                 btn.set_no_show_all(true);
                 btn.hide();
+                if changed {
+                    self.relayout_tiles();
+                }
                 return;
             }
             if let Some(pb) = assets::pixbuf_from_bytes(assets::ICON_PROCTORING_SVG, 22, 22) {
@@ -416,6 +446,9 @@ impl ActionCenterOverlay {
             });
             btn.set_tooltip_text(Some(text));
             btn.set_no_show_all(false);
+            if changed {
+                self.relayout_tiles();
+            }
             btn.show_all();
         }
     }
@@ -613,11 +646,19 @@ impl WindowSwitcherOverlay {
 
         if !self.root.is_visible() {
             self.rebuild_cards(panes, on_commit_id);
-            let count = panes.len();
+            let entries = self.entries.borrow();
+            let count = entries.len();
+            if count == 0 {
+                self.root.hide();
+                return None;
+            }
             if count == 1 {
                 self.selected_index.set(0);
             } else {
-                let active_idx = panes.iter().position(|p| p.id == active_id).unwrap_or(0);
+                let active_idx = entries
+                    .iter()
+                    .position(|(id, _)| *id == active_id)
+                    .unwrap_or(0);
                 let next = if backwards {
                     (active_idx + count - 1) % count
                 } else {
@@ -625,6 +666,7 @@ impl WindowSwitcherOverlay {
                 };
                 self.selected_index.set(next);
             }
+            drop(entries);
             self.update_selection_styles();
             self.root.set_no_show_all(false);
             self.root.show_all();
@@ -724,6 +766,56 @@ impl WindowSwitcherOverlay {
 
             card.add(&card_frame);
             let win_id = pane.id;
+            let cb = Rc::clone(&on_commit_id);
+            let root_c = self.root.clone();
+            card.connect_button_press_event(move |_, ev| {
+                if ev.button() == 1 {
+                    root_c.hide();
+                    cb(win_id);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+
+            self.grid.attach(
+                &card,
+                (i as i32) % MAX_COLUMNS,
+                (i as i32) / MAX_COLUMNS,
+                1,
+                1,
+            );
+            self.entries.borrow_mut().push((win_id, card_frame));
+        }
+
+        // Include Live Application Log window in Alt+Tab switcher when open!
+        if crate::dialogs::is_live_log_viewer_open() {
+            let i = panes.len();
+            let card = gtk::EventBox::new();
+            card.set_visible_window(false);
+
+            let card_frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            card_frame.style_context().add_class("seb-switcher-card");
+            card_frame.set_size_request(CARD_WIDTH, CARD_HEIGHT);
+
+            let hdr = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let hdr_icon = assets::image_from_bytes(assets::ICON_LOG_SVG, 14, 14);
+            hdr.pack_start(&hdr_icon, false, false, 0);
+            let title_lbl = gtk::Label::new(Some("Application Log"));
+            title_lbl.set_xalign(0.0);
+            hdr.pack_start(&title_lbl, true, true, 0);
+            card_frame.pack_start(&hdr, false, false, 0);
+
+            let thumb_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            thumb_box.style_context().add_class("seb-switcher-thumb");
+            thumb_box.set_size_request(THUMB_WIDTH, THUMB_HEIGHT);
+            thumb_box.set_valign(gtk::Align::Fill);
+            let big_icon = assets::image_from_bytes(assets::ICON_LOG_SVG, 48, 48);
+            big_icon.set_valign(gtk::Align::Center);
+            thumb_box.pack_start(&big_icon, true, true, 0);
+            card_frame.pack_start(&thumb_box, true, true, 0);
+
+            card.add(&card_frame);
+            let win_id = crate::dialogs::LIVE_LOG_SWITCHER_ID;
             let cb = Rc::clone(&on_commit_id);
             let root_c = self.root.clone();
             card.connect_button_press_event(move |_, ev| {

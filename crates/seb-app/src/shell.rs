@@ -284,6 +284,42 @@ impl SebAppShell {
             }
         }
 
+        // 4.5. Pre-flight OS Camera Portal permission (org.freedesktop.portal.Camera):
+        //      Request before fullscreen & kernel EVIOCGRAB lockdown so any first-time OS
+        //      privacy prompt (KDE/GNOME) can be answered cleanly outside the locked shell.
+        if session_cfg.settings.browser.media_capture_camera
+            || session_cfg.settings.proctoring.enabled
+        {
+            splash.set_status("Checking OS camera permission...");
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(seb_platform::request_camera_portal_permission());
+            });
+            let outcome = loop {
+                match rx.try_recv() {
+                    Ok(res) => break res,
+                    Err(mpsc::TryRecvError::Empty) => {
+                        dialogs::flush_gtk_events();
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        break seb_platform::CameraPortalOutcome::Unavailable;
+                    }
+                }
+            };
+            match outcome {
+                seb_platform::CameraPortalOutcome::Granted => {
+                    eprintln!("[Permissions] OS camera portal permission granted.");
+                }
+                seb_platform::CameraPortalOutcome::Cancelled
+                | seb_platform::CameraPortalOutcome::Denied => {
+                    eprintln!("[Permissions] OS camera portal permission denied/cancelled by user.");
+                }
+                seb_platform::CameraPortalOutcome::NoCamera
+                | seb_platform::CameraPortalOutcome::Unavailable => {}
+            }
+        }
+
         // 5. Two-phase Anti-Cheat startup (AGENTS.md):
         //    Phase 1: Arm pkexec helper & run prohibited-process pre-flight dialog (Recheck/Quit)
         //             BEFORE grabbing keyboards via EVIOCGRAB!
@@ -293,13 +329,21 @@ impl SebAppShell {
             splash.set_status("Starting privileged Anti-Cheat lockdown...");
             splash.close();
             if let Err(err) = lockdown.start_helper() {
+                let _ = integrity_store.finish(true);
                 dialogs::show_message(None, "Anti-Cheat Lockdown Required", &err, true);
                 return Err(err);
             }
 
             let blacklist = build_blacklist(&session_cfg.settings);
             loop {
-                let detected = lockdown.scan_prohibited_processes(&blacklist)?;
+                let detected = match lockdown.scan_prohibited_processes(&blacklist) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        lockdown.stop();
+                        let _ = integrity_store.finish(true);
+                        return Err(e);
+                    }
+                };
                 if detected.is_empty() {
                     break;
                 }
@@ -812,6 +856,14 @@ impl SebAppShell {
             if ctrl && (key == gdk::keys::constants::l || key == gdk::keys::constants::L) {
                 if let Some(p) = sh.active_pane() {
                     p.focus_address_bar();
+                }
+                return glib::Propagation::Stop;
+            }
+
+            // Alt+F4: close active SEB internal window (Log -> popup pane -> request_quit with password)
+            if alt && !ctrl && key == gdk::keys::constants::F4 {
+                if !dialogs::is_modal_active() {
+                    sh.close_active_window();
                 }
                 return glib::Propagation::Stop;
             }
@@ -1843,6 +1895,13 @@ impl SebAppShell {
 
     fn focus_pane(&self, id: u64) {
         let was_peeking = self.switcher_origin_pane_id.take().is_some();
+        if id == dialogs::LIVE_LOG_SWITCHER_ID {
+            dialogs::set_live_log_viewer_visible(true);
+            return;
+        }
+        if dialogs::is_live_log_viewer_open() {
+            dialogs::set_live_log_viewer_visible(false);
+        }
         if let Some(min_id) = self.switcher_peeked_minimized_id.take() {
             if min_id != id {
                 if let Some(min_pane) = self.panes.borrow().iter().find(|p| p.id == min_id) {
@@ -1930,8 +1989,19 @@ impl SebAppShell {
     /// permanently unminimizing it until Alt is released.
     fn peek_pane(&self, id: u64) {
         if self.switcher_origin_pane_id.get().is_none() {
-            self.switcher_origin_pane_id
-                .set(Some(self.active_pane_id.get()));
+            let orig = if dialogs::is_live_log_viewer_visible() {
+                dialogs::LIVE_LOG_SWITCHER_ID
+            } else {
+                self.active_pane_id.get()
+            };
+            self.switcher_origin_pane_id.set(Some(orig));
+        }
+        if id == dialogs::LIVE_LOG_SWITCHER_ID {
+            dialogs::set_live_log_viewer_visible(true);
+            return;
+        }
+        if dialogs::is_live_log_viewer_open() {
+            dialogs::set_live_log_viewer_visible(false);
         }
         if let Some(prev_min_id) = self.switcher_peeked_minimized_id.get() {
             if prev_min_id != id {
@@ -1977,14 +2047,35 @@ impl SebAppShell {
             }
         }
         if let Some(orig_id) = self.switcher_origin_pane_id.take() {
-            if let Some(orig_pane) = self.panes.borrow().iter().find(|p| p.id == orig_id) {
-                if !orig_pane.minimized.get() {
-                    if let Some(gw) = orig_pane.root.window() {
-                        gw.raise();
+            if orig_id == dialogs::LIVE_LOG_SWITCHER_ID {
+                dialogs::set_live_log_viewer_visible(true);
+            } else {
+                if dialogs::is_live_log_viewer_open() {
+                    dialogs::set_live_log_viewer_visible(false);
+                }
+                if let Some(orig_pane) = self.panes.borrow().iter().find(|p| p.id == orig_id) {
+                    if !orig_pane.minimized.get() {
+                        if let Some(gw) = orig_pane.root.window() {
+                            gw.raise();
+                        }
                     }
                 }
             }
         }
+    }
+
+    fn close_active_window(&self) {
+        if dialogs::is_live_log_viewer_open() && dialogs::is_live_log_viewer_visible() {
+            dialogs::close_live_log_viewer();
+            return;
+        }
+        if let Some(p) = self.active_pane() {
+            if !p.is_main {
+                self.close_pane(p.id);
+                return;
+            }
+        }
+        self.request_quit(None, false);
     }
 
     fn minimize_pane(&self, id: u64) {
@@ -2522,22 +2613,28 @@ impl SebAppShell {
                     }
 
                     let panes = self.panes_in_mru_order();
+                    let current_active_id = if dialogs::is_live_log_viewer_visible() {
+                        dialogs::LIVE_LOG_SWITCHER_ID
+                    } else {
+                        self.active_pane_id.get()
+                    };
                     if terminal == Some(false) {
                         self.cancel_window_switcher();
                     } else if terminal == Some(true) && !self.switcher.is_visible() {
-                        if !panes.is_empty() {
-                            let active_id = self.active_pane_id.get();
-                            let count = panes.len() as isize;
-                            let active_pos = panes
+                        let mut ids: Vec<u64> = panes.iter().map(|p| p.id).collect();
+                        if dialogs::is_live_log_viewer_open() {
+                            ids.push(dialogs::LIVE_LOG_SWITCHER_ID);
+                        }
+                        if !ids.is_empty() {
+                            let count = ids.len() as isize;
+                            let active_pos = ids
                                 .iter()
-                                .position(|p| p.id == active_id)
+                                .position(|&id| id == current_active_id)
                                 .unwrap_or(0) as isize;
                             let target_pos = (active_pos + net_steps).rem_euclid(count) as usize;
-                            let target_id = panes[target_pos].id;
-                            self.focus_pane(target_id);
+                            self.focus_pane(ids[target_pos]);
                         }
                     } else {
-                        let active_id = self.active_pane_id.get();
                         let count = net_steps.unsigned_abs().max(1);
                         let back = net_steps < 0;
                         let mut selected_id = None;
@@ -2546,7 +2643,7 @@ impl SebAppShell {
                             selected_id = self.switcher.step(
                                 back,
                                 &panes,
-                                active_id,
+                                current_active_id,
                                 Rc::new(move |id| sh.focus_pane(id)),
                             );
                         }
@@ -2584,6 +2681,11 @@ impl SebAppShell {
                         if let Some(p) = self.active_pane() {
                             p.navigate_home();
                         }
+                    }
+                }
+                LockdownEvent::CloseActiveWindow => {
+                    if !dialogs::is_modal_active() {
+                        self.close_active_window();
                     }
                 }
                 LockdownEvent::Violation { reason, .. } => {

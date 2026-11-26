@@ -404,6 +404,24 @@ button.seb-proc-kill-btn:active {
     color: black;
 }
 
+window.seb-dialog button.seb-seg-active,
+.seb-dialog button.seb-seg-active,
+button.seb-seg-active {
+    background-color: #add8e6;
+    background: #add8e6;
+    background-image: none;
+    border: 1px solid #1e90ff;
+    color: black;
+    font-weight: 600;
+}
+
+window.seb-dialog button.seb-seg-active label,
+.seb-dialog button.seb-seg-active label,
+button.seb-seg-active label {
+    color: black;
+    font-weight: 600;
+}
+
 entry,
 entry.seb-url-entry {
     background-color: #f0f0f0;
@@ -724,7 +742,44 @@ list.seb-file-list row:selected label.seb-secondary-text {
     font-weight: 600;
 }
 
-scrolledwindow.seb-log-scroll {
+.seb-log-window {
+    background-color: #f0f0f0;
+    color: black;
+    border: 1px solid gray;
+    border-radius: 0px;
+    box-shadow: none;
+}
+
+.seb-log-window .seb-titlebar {
+    border-radius: 0px;
+    background-color: #f0f0f0;
+    color: black;
+}
+
+.seb-log-window button.seb-title-btn {
+    background: #f0f0f0;
+    background-image: none;
+    color: black;
+    border: 1px solid #f0f0f0;
+    border-radius: 0px;
+    min-width: 34px;
+    min-height: 26px;
+    padding: 0px;
+    box-shadow: none;
+}
+
+.seb-log-window button.seb-title-btn:hover {
+    background: #add8e6;
+    border: 1px solid #1e90ff;
+}
+
+.seb-log-window button.seb-title-btn:active {
+    background: #87ceeb;
+    border: 1px solid #1e90ff;
+}
+
+scrolledwindow.seb-log-scroll,
+scrolledwindow.seb-log-scroll viewport {
     background-color: #f0f0f0;
     border: 1px solid gray;
 }
@@ -732,6 +787,7 @@ scrolledwindow.seb-log-scroll {
 textview.seb-log-view,
 textview.seb-log-view text {
     background-color: #f0f0f0;
+    background-image: none;
     color: black;
     font-size: 12px;
 }

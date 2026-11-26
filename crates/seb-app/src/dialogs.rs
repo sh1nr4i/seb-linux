@@ -325,6 +325,10 @@ impl SebModal {
                     if w.is::<gtk::Button>() {
                         w.style_context().add_class("seb-btn-focused");
                     }
+                    let w_idle = w.clone();
+                    glib::idle_add_local_once(move || {
+                        w_idle.grab_focus();
+                    });
                 } else if let Some(ref def_btn) = def_btn_focus {
                     def_btn.grab_focus();
                     def_btn.style_context().add_class("seb-btn-focused");
@@ -674,13 +678,20 @@ pub fn prompt_password(parent: Option<&gtk::Window>, title: &str, prompt: &str) 
     let entry = gtk::Entry::new();
     entry.set_visibility(false);
     entry.set_width_chars(34);
+    let captured = Rc::new(RefCell::new(String::new()));
+    {
+        let cap = Rc::clone(&captured);
+        entry.connect_changed(move |e| {
+            *cap.borrow_mut() = e.text().to_string();
+        });
+    }
     if let Some(btn) = ok_btn {
         entry.connect_activate(move |_| btn.clicked());
     }
     dlg.body.pack_start(&entry, false, false, 0);
 
     let resp = dlg.run(Some(entry.clone().upcast()));
-    let value = entry.text().to_string();
+    let value = captured.borrow().clone();
 
     if resp == gtk::ResponseType::Ok {
         Some(value)
@@ -709,13 +720,20 @@ pub fn prompt_text(
     let entry = gtk::Entry::new();
     entry.set_text(default_value);
     entry.set_width_chars(36);
+    let captured = Rc::new(RefCell::new(default_value.to_string()));
+    {
+        let cap = Rc::clone(&captured);
+        entry.connect_changed(move |e| {
+            *cap.borrow_mut() = e.text().to_string();
+        });
+    }
     if let Some(btn) = ok_btn {
         entry.connect_activate(move |_| btn.clicked());
     }
     dlg.body.pack_start(&entry, false, false, 0);
 
     let resp = dlg.run(Some(entry.clone().upcast()));
-    let value = entry.text().to_string();
+    let value = captured.borrow().clone();
 
     if resp == gtk::ResponseType::Ok {
         Some(value)
@@ -742,11 +760,21 @@ pub fn prompt_credentials(
 
     let user_entry = gtk::Entry::new();
     user_entry.set_placeholder_text(Some("Username"));
+    let cap_u = Rc::new(RefCell::new(String::new()));
+    {
+        let cu = Rc::clone(&cap_u);
+        user_entry.connect_changed(move |e| *cu.borrow_mut() = e.text().to_string());
+    }
     dlg.body.pack_start(&user_entry, false, false, 0);
 
     let pass_entry = gtk::Entry::new();
     pass_entry.set_placeholder_text(Some("Password"));
     pass_entry.set_visibility(false);
+    let cap_p = Rc::new(RefCell::new(String::new()));
+    {
+        let cp = Rc::clone(&cap_p);
+        pass_entry.connect_changed(move |e| *cp.borrow_mut() = e.text().to_string());
+    }
     {
         let pe = pass_entry.clone();
         user_entry.connect_activate(move |_| pe.grab_focus());
@@ -757,8 +785,8 @@ pub fn prompt_credentials(
     dlg.body.pack_start(&pass_entry, false, false, 0);
 
     let resp = dlg.run(Some(user_entry.clone().upcast()));
-    let u = user_entry.text().to_string();
-    let p = pass_entry.text().to_string();
+    let u = cap_u.borrow().clone();
+    let p = cap_p.borrow().clone();
 
     if resp == gtk::ResponseType::Ok {
         Some((u, p))
@@ -1025,8 +1053,40 @@ pub fn show_verificator_dialog(
     dlg.run(focus_btn.map(|b| b.upcast()));
 }
 
+pub const LIVE_LOG_SWITCHER_ID: u64 = u64::MAX;
+
 thread_local! {
     static ACTIVE_LOG_CLOSER: RefCell<Option<Rc<dyn Fn()>>> = RefCell::new(None);
+    static ACTIVE_LOG_CARD: RefCell<Option<gtk::EventBox>> = RefCell::new(None);
+}
+
+pub fn is_live_log_viewer_open() -> bool {
+    ACTIVE_LOG_CLOSER.with(|cell| cell.borrow().is_some())
+}
+
+pub fn is_live_log_viewer_visible() -> bool {
+    ACTIVE_LOG_CARD.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|c| c.is_visible())
+    })
+}
+
+pub fn set_live_log_viewer_visible(visible: bool) {
+    ACTIVE_LOG_CARD.with(|cell| {
+        if let Some(ref c) = *cell.borrow() {
+            if visible {
+                MAIN_OVERLAY.with(|ov_cell| {
+                    if let Some(ov) = ov_cell.borrow().as_ref().and_then(|w| w.upgrade()) {
+                        ov.reorder_overlay(c, -1);
+                    }
+                });
+                c.show_all();
+            } else {
+                c.hide();
+            }
+        }
+    });
 }
 
 pub fn close_live_log_viewer() {
@@ -1051,10 +1111,7 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
     };
 
     let card = gtk::EventBox::new();
-    card.set_visible_window(true);
-    card.style_context().add_class("seb-dialog");
-    card.style_context().add_class("seb-window-frame");
-    card.style_context().add_class("windowed");
+    card.set_visible_window(false);
     card.set_size_request(660, 420);
     card.set_halign(gtk::Align::Start);
     card.set_valign(gtk::Align::Start);
@@ -1062,18 +1119,21 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
     card.set_margin_top(80);
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    outer.style_context().add_class("seb-dialog");
+    outer.style_context().add_class("seb-log-window");
 
-    // Draggable 26px SEB titlebar
+    // Draggable 26px SEB titlebar (identical to SebModal / BrowserPane)
     let title_eb = gtk::EventBox::new();
     title_eb.add_events(
         gdk::EventMask::BUTTON_PRESS_MASK
             | gdk::EventMask::BUTTON_RELEASE_MASK
             | gdk::EventMask::POINTER_MOTION_MASK,
     );
-    let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     title_row.style_context().add_class("seb-titlebar");
     title_row.set_size_request(-1, 26);
-    let icon = assets::image_from_bytes(assets::ICON_LOG_SVG, 15, 15);
+    let icon = assets::image_from_bytes(assets::ICON_SEB_PNG, 15, 15);
+    icon.set_margin_end(6);
     let title_lbl = gtk::Label::new(Some("Application Log"));
     title_lbl.set_xalign(0.0);
     let close_x = gtk::Button::new();
@@ -1096,21 +1156,11 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
     hairline.set_size_request(-1, 1);
     outer.pack_start(&hairline, false, false, 0);
 
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    vbox.set_margin_top(8);
-    vbox.set_margin_bottom(10);
-    vbox.set_margin_start(10);
-    vbox.set_margin_end(10);
-
-    let ctrl_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    let auto_scroll = gtk::CheckButton::with_label("Auto-Scroll");
-    auto_scroll.set_active(true);
-    let copy_btn = gtk::Button::with_label("Copy All");
-    let close_btn = gtk::Button::with_label("Close");
-    ctrl_row.pack_start(&auto_scroll, false, false, 0);
-    ctrl_row.pack_end(&close_btn, false, false, 0);
-    ctrl_row.pack_end(&copy_btn, false, false, 0);
-    vbox.pack_start(&ctrl_row, false, false, 0);
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vbox.set_margin_top(14);
+    vbox.set_margin_bottom(14);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
 
     let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     scroll.style_context().add_class("seb-log-scroll");
@@ -1125,6 +1175,17 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
     view.set_bottom_margin(6);
     scroll.add(&view);
     vbox.pack_start(&scroll, true, true, 0);
+
+    let ctrl_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let auto_scroll = gtk::CheckButton::with_label("Auto-Scroll");
+    auto_scroll.set_active(true);
+    let copy_btn = gtk::Button::with_label("Copy All");
+    let close_btn = gtk::Button::with_label("Close");
+    ctrl_row.pack_start(&auto_scroll, false, false, 0);
+    ctrl_row.pack_end(&close_btn, false, false, 0);
+    ctrl_row.pack_end(&copy_btn, false, false, 0);
+    vbox.pack_end(&ctrl_row, false, false, 0);
+
     outer.pack_start(&vbox, true, true, 0);
     card.add(&outer);
 
@@ -1229,6 +1290,9 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
                 ACTIVE_LOG_CLOSER.with(|cell| {
                     *cell.borrow_mut() = None;
                 });
+                ACTIVE_LOG_CARD.with(|cell| {
+                    *cell.borrow_mut() = None;
+                });
                 c.hide();
                 ov_c.remove(&c);
                 unsafe {
@@ -1239,6 +1303,9 @@ pub fn show_live_log_viewer(_parent: Option<&gtk::Window>, logs: Rc<RefCell<Vec<
     };
     ACTIVE_LOG_CLOSER.with(|cell| {
         *cell.borrow_mut() = Some(Rc::clone(&do_close));
+    });
+    ACTIVE_LOG_CARD.with(|cell| {
+        *cell.borrow_mut() = Some(card.clone());
     });
     {
         let dc = Rc::clone(&do_close);
@@ -1704,4 +1771,228 @@ pub fn show_save_download_dialog(
     )
     .into_iter()
     .next()
+}
+
+pub struct PrintJobConfig {
+    pub printer_name: String,
+    pub output_pdf_path: Option<PathBuf>,
+    pub copies: i32,
+    pub landscape: bool,
+}
+
+fn discover_cups_printers() -> Vec<String> {
+    let out = std::process::Command::new("lpstat")
+        .arg("-a")
+        .env("LC_ALL", "C")
+        .output();
+    let Ok(output) = out else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Custom frameless high-contrast SEB Print dialog (replaces native GtkPrintUnixDialog +
+/// GtkFileChooserDialog so printing stays 100% inside the SEB light palette and sandboxed file chooser).
+pub fn show_print_dialog(
+    parent: Option<&gtk::Window>,
+    default_dir: &Path,
+) -> Option<PrintJobConfig> {
+    let mut dlg = SebModal::new(parent, "Print", gtk::ResponseType::Cancel);
+    dlg.set_default_size(460, -1);
+    let focus_btn = dlg.add_buttons(&[
+        ("Cancel", gtk::ResponseType::Cancel, false),
+        ("Print", gtk::ResponseType::Accept, true),
+    ]);
+
+    let mut printers = vec!["Print to File (PDF)".to_string()];
+    printers.extend(discover_cups_printers());
+
+    let printer_lbl = gtk::Label::new(Some("Printer:"));
+    printer_lbl.set_xalign(0.0);
+    dlg.body.pack_start(&printer_lbl, false, false, 0);
+
+    let scroll = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_min_content_height(100);
+    scroll.style_context().add_class("seb-file-scroll");
+
+    let list_box = gtk::ListBox::new();
+    list_box.set_selection_mode(gtk::SelectionMode::Single);
+    list_box.style_context().add_class("seb-file-list");
+    for name in &printers {
+        let lbl = gtk::Label::new(Some(name));
+        lbl.set_xalign(0.0);
+        lbl.set_margin_top(4);
+        lbl.set_margin_bottom(4);
+        lbl.set_margin_start(6);
+        list_box.add(&lbl);
+    }
+    if let Some(first) = list_box.row_at_index(0) {
+        list_box.select_row(Some(&first));
+    }
+    scroll.add(&list_box);
+    dlg.body.pack_start(&scroll, true, true, 0);
+
+    // Output PDF path row (shown when "Print to File (PDF)" is selected)
+    let pdf_path = Rc::new(RefCell::new(default_dir.join("output.pdf")));
+    let pdf_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let pdf_lbl = gtk::Label::new(Some("File:"));
+    let pdf_entry = gtk::Entry::new();
+    pdf_entry.style_context().add_class("seb-url-entry");
+    pdf_entry.set_text(&pdf_path.borrow().to_string_lossy());
+    pdf_entry.set_editable(false);
+    let choose_btn = gtk::Button::with_label("Choose...");
+    choose_btn.set_can_focus(false);
+    {
+        let p_ref = Rc::clone(&pdf_path);
+        let e_c = pdf_entry.clone();
+        let parent_owned = parent.cloned();
+        choose_btn.connect_clicked(move |_| {
+            let cur = p_ref.borrow().clone();
+            let dir = cur
+                .parent()
+                .filter(|d| d.is_dir())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(std::env::temp_dir);
+            let fname = cur
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("output.pdf");
+            if let Some(mut chosen) = show_save_download_dialog(parent_owned.as_ref(), &dir, fname)
+            {
+                if chosen
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| !e.eq_ignore_ascii_case("pdf"))
+                    .unwrap_or(true)
+                {
+                    chosen.set_extension("pdf");
+                }
+                e_c.set_text(&chosen.to_string_lossy());
+                *p_ref.borrow_mut() = chosen;
+            }
+        });
+    }
+    pdf_row.pack_start(&pdf_lbl, false, false, 0);
+    pdf_row.pack_start(&pdf_entry, true, true, 0);
+    pdf_row.pack_end(&choose_btn, false, false, 0);
+    dlg.body.pack_start(&pdf_row, false, false, 4);
+
+    // Toggle PDF row sensitivity based on selected printer
+    {
+        let pr = pdf_row.clone();
+        list_box.connect_row_selected(move |_, row| {
+            let is_pdf = row.map(|r| r.index() == 0).unwrap_or(true);
+            pr.set_sensitive(is_pdf);
+        });
+    }
+
+    // Copies (custom - / N / +) & Orientation (Portrait / Landscape toggle buttons, no up/down arrows)
+    let opts_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let copies_lbl = gtk::Label::new(Some("Copies:"));
+    let copies_val = Rc::new(Cell::new(1i32));
+    let dec_btn = gtk::Button::with_label("-");
+    dec_btn.set_can_focus(false);
+    dec_btn.set_size_request(28, 28);
+    let copies_num = gtk::Label::new(Some("1"));
+    copies_num.set_size_request(28, -1);
+    let inc_btn = gtk::Button::with_label("+");
+    inc_btn.set_can_focus(false);
+    inc_btn.set_size_request(28, 28);
+    {
+        let cv = Rc::clone(&copies_val);
+        let lbl = copies_num.clone();
+        dec_btn.connect_clicked(move |_| {
+            let next = (cv.get() - 1).max(1);
+            cv.set(next);
+            lbl.set_text(&next.to_string());
+        });
+    }
+    {
+        let cv = Rc::clone(&copies_val);
+        let lbl = copies_num.clone();
+        inc_btn.connect_clicked(move |_| {
+            let next = (cv.get() + 1).min(99);
+            cv.set(next);
+            lbl.set_text(&next.to_string());
+        });
+    }
+
+    let orient_lbl = gtk::Label::new(Some("Orientation:"));
+    let landscape_val = Rc::new(Cell::new(false));
+    let portrait_btn = gtk::Button::with_label("Portrait");
+    portrait_btn.set_can_focus(false);
+    portrait_btn.style_context().add_class("seb-seg-active");
+    let landscape_btn = gtk::Button::with_label("Landscape");
+    landscape_btn.set_can_focus(false);
+    {
+        let lv = Rc::clone(&landscape_val);
+        let pb = portrait_btn.clone();
+        let lb = landscape_btn.clone();
+        portrait_btn.connect_clicked(move |_| {
+            lv.set(false);
+            pb.style_context().add_class("seb-seg-active");
+            lb.style_context().remove_class("seb-seg-active");
+        });
+    }
+    {
+        let lv = Rc::clone(&landscape_val);
+        let pb = portrait_btn.clone();
+        let lb = landscape_btn.clone();
+        landscape_btn.connect_clicked(move |_| {
+            lv.set(true);
+            lb.style_context().add_class("seb-seg-active");
+            pb.style_context().remove_class("seb-seg-active");
+        });
+    }
+
+    opts_row.pack_start(&copies_lbl, false, false, 0);
+    opts_row.pack_start(&dec_btn, false, false, 0);
+    opts_row.pack_start(&copies_num, false, false, 0);
+    opts_row.pack_start(&inc_btn, false, false, 0);
+    opts_row.pack_start(&orient_lbl, false, false, 8);
+    opts_row.pack_start(&portrait_btn, true, true, 0);
+    opts_row.pack_start(&landscape_btn, true, true, 0);
+    dlg.body.pack_start(&opts_row, false, false, 4);
+
+    let selected_idx = Rc::new(Cell::new(0usize));
+    {
+        let si = Rc::clone(&selected_idx);
+        list_box.connect_row_selected(move |_, row| {
+            if let Some(r) = row {
+                si.set(r.index().max(0) as usize);
+            }
+        });
+    }
+
+    if dlg.run(focus_btn.map(|b| b.upcast())) != gtk::ResponseType::Accept {
+        return None;
+    }
+
+    let idx = selected_idx.get();
+    let is_pdf = idx == 0;
+    let printer_name = printers
+        .get(idx)
+        .cloned()
+        .unwrap_or_else(|| "Print to File".to_string());
+    let output_pdf_path = if is_pdf {
+        Some(pdf_path.borrow().clone())
+    } else {
+        None
+    };
+
+    Some(PrintJobConfig {
+        printer_name,
+        output_pdf_path,
+        copies: copies_val.get().clamp(1, 99),
+        landscape: landscape_val.get(),
+    })
 }
