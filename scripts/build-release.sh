@@ -150,7 +150,7 @@ Section: education
 Priority: optional
 Architecture: amd64
 Maintainer: SEB Linux Contributors <noreply@example.org>
-Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, shared-mime-info, desktop-file-utils
+Depends: libc6 (>= 2.35), libwebkit2gtk-4.1-0, libgtk-3-0 | libgtk-3-0t64, polkitd | policykit-1, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, shared-mime-info, desktop-file-utils
 Description: Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
  Opens .seb exam configuration files, handles seb:// and sebs:// links,
  and enforces kernel-level anti-cheat lockdown.
@@ -197,7 +197,7 @@ Version:        ${SEB_VERSION}
 Release:        1%{?dist}
 Summary:        Safe Exam Browser for Linux (Rust, GTK3 + WebKitGTK)
 License:        MPL-2.0
-Requires:       webkit2gtk4.1, gtk3, polkit, desktop-file-utils, shared-mime-info
+Requires:       webkit2gtk4.1, gtk3, polkit, gstreamer1-plugins-base, gstreamer1-plugins-good, desktop-file-utils, shared-mime-info
 
 %description
 Opens .seb exam configuration files, handles seb:// and sebs:// links,

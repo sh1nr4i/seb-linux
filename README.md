@@ -61,7 +61,7 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/sh1
 ./scripts/dependencies.sh
 ```
 
-Required libraries: Rust/Cargo toolchain, `gtk3`, `webkit2gtk-4.1`, `polkit`, `pkg-config`, and standard desktop MIME/icon utilities.
+Required libraries: Rust/Cargo toolchain, `gtk3`, `webkit2gtk-4.1`, `gst-plugins-base`, `gst-plugins-good` (for camera/microphone/audio in WebKitGTK), `polkit`, `pkg-config`, and standard desktop MIME/icon utilities.
 
 ### 2. Build
 
