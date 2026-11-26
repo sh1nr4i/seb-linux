@@ -107,6 +107,17 @@ fn main() -> ExitCode {
     if std::env::var_os("SOUP_GSSAPI_BLOCKLISTED_URIS").is_none() {
         std::env::set_var("SOUP_GSSAPI_BLOCKLISTED_URIS", "https://,http://");
     }
+    // Avoid GStreamer 1.28 + PipeWire DMA-BUF / GL sink camera flicker & black-frame-on-restart in WebKitGTK 2.54+
+    if std::env::var_os("WEBKIT_GST_DMABUF_SINK_DISABLED").is_none() {
+        std::env::set_var("WEBKIT_GST_DMABUF_SINK_DISABLED", "1");
+    }
+    if std::env::var_os("WEBKIT_GST_DISABLE_GL_SINK").is_none() {
+        std::env::set_var("WEBKIT_GST_DISABLE_GL_SINK", "1");
+    }
+    // Prevent WebKitGTK from suspending camera/proctoring <video> elements toggled from display:none
+    if std::env::var_os("WEBKIT_GST_ALLOW_PLAYBACK_OF_INVISIBLE_VIDEOS").is_none() {
+        std::env::set_var("WEBKIT_GST_ALLOW_PLAYBACK_OF_INVISIBLE_VIDEOS", "1");
+    }
 
     if gtk::init().is_err() {
         eprintln!("Failed to initialize GTK3 display.");

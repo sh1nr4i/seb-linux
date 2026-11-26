@@ -1520,6 +1520,86 @@ impl PlatformMonitor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraPortalOutcome {
+    Granted,
+    Cancelled,
+    Denied,
+    NoCamera,
+    Unavailable,
+}
+
+/// Pre-flight camera permission request via the standard `org.freedesktop.portal.Camera`
+/// D-Bus portal (`AccessCamera`). Calling this BEFORE entering fullscreen / kernel lockdown
+/// ensures any first-time OS privacy prompt (e.g. KDE / GNOME portal) is answered cleanly
+/// before the locked exam session begins. If permission was already granted previously,
+/// the portal returns `Granted` immediately without showing a dialog.
+pub fn request_camera_portal_permission() -> CameraPortalOutcome {
+    let Ok(conn) = DBusConnection::session() else {
+        return CameraPortalOutcome::Unavailable;
+    };
+
+    // Skip immediately if the portal reports no camera hardware present.
+    if let Some(val) = dbus_get_prop(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Camera",
+        "IsCameraPresent",
+    ) {
+        if let Ok(false) = bool::try_from(val) {
+            return CameraPortalOutcome::NoCamera;
+        }
+    }
+
+    let Some(unique) = conn.unique_name() else {
+        return CameraPortalOutcome::Unavailable;
+    };
+    let sender_segment = unique.as_str().trim_start_matches(':').replace('.', "_");
+    let token = format!("seb_cam_{}", std::process::id());
+    let expected_path = format!("/org/freedesktop/portal/desktop/request/{sender_segment}/{token}");
+
+    let Ok(req_proxy) = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        expected_path.as_str(),
+        "org.freedesktop.portal.Request",
+    ) else {
+        return CameraPortalOutcome::Unavailable;
+    };
+    let Ok(mut signals) = req_proxy.receive_signal("Response") else {
+        return CameraPortalOutcome::Unavailable;
+    };
+
+    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+    options.insert("handle_token", Value::from(token.as_str()));
+
+    if conn
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.Camera"),
+            "AccessCamera",
+            &(options,),
+        )
+        .is_err()
+    {
+        return CameraPortalOutcome::Unavailable;
+    }
+
+    if let Some(msg) = signals.next() {
+        if let Ok((code, _results)) = msg.body().deserialize::<(u32, HashMap<String, OwnedValue>)>()
+        {
+            return match code {
+                0 => CameraPortalOutcome::Granted,
+                1 => CameraPortalOutcome::Cancelled,
+                _ => CameraPortalOutcome::Denied,
+            };
+        }
+    }
+    CameraPortalOutcome::Unavailable
+}
+
 impl Drop for PlatformMonitor {
     fn drop(&mut self) {
         self.running
